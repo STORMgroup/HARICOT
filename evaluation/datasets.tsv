@@ -1,0 +1,15 @@
+id	key	species	reference	main_contig	quast	paternal
+D1	cj	Campylobacter jejuni	GenBank CP149499.1	CP149499.1	bact	-
+D2	lm	Listeria monocytogenes	GenBank CP149495.1	CP149495.1	bact	-
+D3	vp1	Vibrio parahaemolyticus	GenBank CP149505.1, CP149506.1	CP149505.1	bact	-
+D4	vp2	Vibrio parahaemolyticus	GenBank CP149505.1, CP149506.1	CP149506.1	bact	-
+D5	se	Salmonella enterica	GenBank CP149507.1, CP149508.1 (plasmid)	CP149507.1	bact	-
+D6	sd	Streptococcus dysgalactiae	GenBank CP149485.1	CP149485.1	bact	-
+D7	at2	Arabidopsis thaliana	TAIR10, RefSeq GCF_000001735.4	NC_003071.7	large	-
+D8	at3	Arabidopsis thaliana	TAIR10, RefSeq GCF_000001735.4	NC_003074.8	large	-
+D9	at5	Arabidopsis thaliana	TAIR10, RefSeq GCF_000001735.4	NC_003076.8	large	-
+D10	dm2L	Drosophila melanogaster	Release 6, RefSeq GCF_000001215.4	NT_033779.5	large	-
+D11	dm2R	Drosophila melanogaster	Release 6, RefSeq GCF_000001215.4	NT_033778.4	large	-
+D12	dm3L	Drosophila melanogaster	Release 6, RefSeq GCF_000001215.4	NT_037436.4	large	-
+D13	dmX	Drosophila melanogaster	Release 6, RefSeq GCF_000001215.4	NC_004354.4	large	-
+D14	hg18	Homo sapiens (HG002)	HG002 Q100 v1.2, maternal haplotype; paternal chr18 for the second QUAST run	chr18_MATERNAL	large	chr18_PATERNAL

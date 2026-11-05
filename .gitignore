@@ -1,0 +1,50 @@
+# Build outputs
+/target/
+**/target/
+*.rs.bk
+__pycache__/
+*.pyc
+
+# Local data, forests and upstream sources (downloaded; not in git)
+/data
+/data/
+/models/
+/read_lists/
+/downloads/
+/refs/
+/haricot-*-v1.tar.gz
+/envs/condaenv.*.requirements.txt
+/extern/
+
+# Run outputs
+/*.out
+/runs/
+logs/
+
+# Signal, alignment, assembly and model files
+*.pod5
+*.fast5
+*.slow5
+*.blow5
+*.bam
+*.bai
+*.sam
+*.gfa
+*.paf
+*.mmi
+*.joblib
+*.rfb
+*.rfmeta
+*.png
+!/docs/haricot-overview.png
+/docs/*.pdf
+
+# Local notes
+/CLAUDE.md
+/INSTRUCTIONS.md
+.claude/
+
+# Editor and OS files
+*.swp
+*~
+.DS_Store

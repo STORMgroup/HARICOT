@@ -1,0 +1,28 @@
+# Truth, training, scoring and checks, at the versions of the manuscript runs.
+#   conda env create -f envs/haricot.yml && conda activate haricot
+# (haricot assemble itself needs no Python.)
+name: haricot
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.14.4
+  - samtools=1.23.1
+  - htslib=1.23.1
+  - minimap2=2.31
+  - winnowmap=2.03
+  - meryl=1.4.1
+  - seqkit=2.13.0
+  - miniasm=0.3
+  - gfatools=0.5.5
+  - pip
+  - pip:
+      - numpy==2.4.4
+      - pandas==3.0.2
+      - scipy==1.17.1
+      - scikit-learn==1.9.1
+      - joblib==1.6.0
+      - pysam==0.24.0
+      - pod5==0.3.39
+      - pillow==12.2.0
+      - matplotlib==3.10.9

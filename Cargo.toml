@@ -1,0 +1,65 @@
+[package]
+name = "haricot"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.87"
+description = "De Bruijn / wtdbg2-style genome assembly directly from raw nanopore signal (e-mers)"
+license = "MIT"
+
+[workspace]
+# The pipeline programs (pipeline/) build with the CLI: `cargo build --release` puts every binary in target/release.
+members = [".", "pipeline"]
+default-members = [".", "pipeline"]
+
+[[bin]]
+name = "haricot"
+path = "src/main.rs"
+
+[lib]
+name = "haricot"
+path = "src/lib.rs"
+
+[dependencies]
+# Raw signal I/O. pod5 is the primary format (pure-Rust reader, no system deps).
+pod5lib = { git = "https://github.com/Psy-Fer/pod5lib-rs", rev = "4e77fe824201e52ea41f98fb4eaeb0ace6e215ef" }
+# CLI, errors, logging.
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+thiserror = "2"
+log = "0.4"
+env_logger = "0.11"
+# Fast non-cryptographic hash maps for seed indexing.
+rustc-hash = "2"
+# Data-parallelism for the all-vs-all per-pair overlap DP (performance).
+rayon = "1"
+# Multithreaded allocator (see the `#[global_allocator]` in lib.rs). The overlap DP
+# allocates a scratch `Vec<f64>` per slope evaluation per read pair -- ~1.2e9
+# short-lived allocations on E. coli fwd-30x -- and glibc arena locking makes that the
+# scaling limit of an otherwise embarrassingly parallel phase.
+mimalloc = { version = "0.1", default-features = false }
+# Serialization (derive) so overlaps can be cached to disk and reused across
+# build-parameter iterations without recomputing the expensive all-vs-all.
+serde = { version = "1", features = ["derive"] }
+# `haricot assemble`: per-step resource use of the pipeline programs (wait4) and the forests' SHA-256.
+libc = "0.2"
+sha2 = "0.10"
+
+# fast5 (HDF5) support is OPTIONAL and off by default; pod5 is the focus.
+# Enable with `--features fast5` (requires a system libhdf5).
+hdf5-metno = { version = "0.12.5", optional = true }
+
+[features]
+default = []
+fast5 = ["dep:hdf5-metno"]
+
+[dev-dependencies]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+# Arrow IPC reader that accepts delta dictionary batches (pod5s written by the Python pod5 writer over
+# several runs carry them; upstream arrow-ipc 53.4.1 rejects them). Upstream 53.4.1 plus one patch:
+# vendor/README.md.
+[patch.crates-io]
+arrow-ipc = { path = "vendor/arrow-ipc" }

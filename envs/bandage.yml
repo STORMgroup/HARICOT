@@ -1,0 +1,8 @@
+# BandageNG for the appendix panels (evaluation/bandage/panels.sh).
+#   conda env create -f envs/bandage.yml
+name: haricot-bandage
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - bandage_ng=2026.4.1

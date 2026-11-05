@@ -1,0 +1,14 @@
+# The comparators and QUAST, at the versions of the manuscript runs (QUAST's reports depend on its minimap2: 2.30).
+#   conda env create -f envs/assemblers.yml
+# wtdbg2 2.5 (github.com/ruanjue/wtdbg2, b77c565) and RawHash2 (github.com/STORMgroup/RawHash2, 92366af) build from
+# source (`make`; RawHash2: `make cmake`).
+name: haricot-assemblers
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.12.13
+  - flye=2.9.6
+  - quast=5.3.0
+  - minimap2=2.30
+  - samtools=1.22.1

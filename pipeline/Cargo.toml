@@ -1,0 +1,57 @@
+# The pipeline programs `haricot assemble` runs (one per step), `haricot-ovl-filter` (cache filtering and dumps, used
+# by the checks), and the signal-exact truth programs that make the training labels. A member of the workspace at the
+# repository root: `cargo build --release` there builds them into target/release next to `haricot`.
+[package]
+name = "haricot-pipeline"
+version = "0.1.0"
+edition = "2024"
+publish = false
+autobins = false
+
+# The steps of haricot assemble, and haricot-ovl-filter -----------------------------
+[[bin]]
+name = "haricot-detect"    # candidate detection (--save-overlaps) and graph + layout (--load-overlaps)
+path = "src/bin/detect.rs"
+
+[[bin]]
+name = "haricot-pair-features" # stage-1 features per candidate (geometry, path, context, signal DTW)
+path = "src/bin/pair_features.rs"
+
+[[bin]]
+name = "haricot-graph-features" # stage-2 features: mutual support / offset consistency in the accepted graph
+path = "src/bin/graph_features.rs"
+
+[[bin]]
+name = "haricot-forest"    # the saved forests (training/export_forest.py) over one dataset's features
+path = "src/bin/forest.rs"
+
+[[bin]]
+name = "haricot-layout"    # policy7 .. the end bridges' build (layout), the rescue's admission + final build (final)
+path = "src/bin/layout.rs"
+
+[[bin]]
+name = "haricot-ovl-filter" # subtract overlaps from a cache by read or by pair; dump a cache as TSV
+path = "src/bin/ovl_filter.rs"
+
+[[bin]]
+name = "haricot-rescue"    # contig-end rescue: per-offset significance of end-read pairs; emit admitted ones
+path = "src/bin/rescue.rs"
+
+# Truth (signal-exact oracle; training labels) ------------------------------------
+[[bin]]
+name = "haricot-truth-events" # raw-signal sample span of every retained event (move-table join)
+path = "src/bin/truth_events.rs"
+
+[[bin]]
+name = "haricot-truth-oracle" # signal-exact oracle: paths from per-event reference positions
+path = "src/bin/truth_oracle.rs"
+
+[dependencies]
+# The root package (`haricot`): its library, imported in code as `haricot`.
+haricot = { path = ".." }
+anyhow = "1"
+# Cache overlaps to disk (haricot-detect --save/--load-overlaps) for fast build iteration.
+bincode = "1"
+serde = { version = "1", features = ["derive"] }
+rustc-hash = "2"
+rayon = "1"

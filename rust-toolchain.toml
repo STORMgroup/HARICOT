@@ -1,0 +1,4 @@
+# The toolchain of the manuscript builds; rustup installs it on first use.
+[toolchain]
+channel = "1.96.0"
+components = ["rustfmt", "clippy"]
