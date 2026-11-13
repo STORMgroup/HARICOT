@@ -2,17 +2,22 @@
 """The reads training never uses: every read whose id is in the base sets of two or more genomes of the training
 table (a base set: the row whose key is its genome), and the exact-cut fragments of those reads (their own ids, from
 the table's fragment tables), which carry the same signal under new ids. One id per line, sorted.
+training/train.sh runs it.
 
 Usage: excluded_reads.py SETS.tsv OUT.txt   (SETS.tsv: train.sh's table)
 """
+import argparse
 import csv
-import sys
 
 import pod5
 
 
 def main():
-    sets, out = sys.argv[1], sys.argv[2]
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("sets", help="train.sh's table of training sets")
+    ap.add_argument("out", help="the excluded read ids (written)")
+    a = ap.parse_args()
+    sets, out = a.sets, a.out
     rows = list(csv.DictReader(open(sets), delimiter="\t"))
     genomes = {}
     for r in rows:

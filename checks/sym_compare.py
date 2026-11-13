@@ -4,7 +4,7 @@ same reads in different pod5 orders (the reads numbered in each pod5's order) or
 back), every output compared as a function of the read set alone.
 
   final / builds  the 8 graph and layout files (fbg.gfa fbg_nodes.tsv unitigs.gfa unitig_nodes.tsv unitig_paths.tsv
-                  contigs.gfa contig_paths.tsv contig_nodes.tsv) of OUT/ and of the pol7 / eb builds: byte for byte
+                  contigs.gfa contig_paths.tsv contig_nodes.tsv) of OUT/ and of the builds in work/pol7 and work/eb: byte for byte
   canon           every candidate cache's canonical dump (`haricot-ovl-filter --dump-canonical`, written by invariance.sh into
                   work/canon/): rows keyed by the two read names in the pair's canonical frame, every column exact
                   except `slope`, which may differ by a relative 1e-12 (a stored slope is the inverse of the frame's
@@ -16,11 +16,12 @@ back), every output compared as a function of the read set alone.
   idx_pairs       pool.tsv, acc.tsv, admit.tsv (read indices): mapped through each run's read_names.tsv, equal as sets
   threads         the read-placement dumps (work/thr.tsv, work/thr_eb.tsv, OUT/threads.tsv): read numbers mapped
                   to names, equal as multisets of rows
-  pool_detail     q9c/pool_detail.tsv: the header lines exact; rows with the two reads in name order (a row read the
-                  other way round has its shape mirrored and its end pairs reversed), end pairs as a set; equal as sets
-  dump            cand.dump.tsv (`haricot-ovl-filter --dump` of the candidates, owner first): rows in the canonical frame (query =
-                  the longer read, equal lengths the smaller name), every column but `slope` exact (the canonical cache
-                  dump of the same cache carries the slope)
+  pool_detail     work/q9c/pool_detail.tsv (the contig-end rescue's pool): the header lines exact; rows with the two
+                  reads in name order (a row read the other way round has its shape mirrored and its end pairs
+                  reversed), end pairs as a set; equal as sets
+  dump            work/cand.dump.tsv (haricot-layout's dump of the candidates, owner first): rows in the canonical
+                  frame (query = the longer read, equal lengths the smaller name), every column but `slope` exact (the
+                  canonical cache dump of the same cache carries the slope)
   names           read_names.tsv: the same set of names (the numbering itself differs by construction)
   bytes           everything else (depth.txt, ...): byte for byte
 Not compared: *.log, *.stdout, time.tsv (timings) and the *.bin caches themselves (compared through their dumps).
@@ -253,9 +254,9 @@ def files(root):
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("a")
-    ap.add_argument("b")
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("a", help="the reference run (haricot assemble --keep-work)")
+    ap.add_argument("b", help="the run on the permuted or renamed reads (renamed: name_back.py's copy)")
     ap.add_argument("--label", required=True)
     ap.add_argument("--out")
     a = ap.parse_args()

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Signal-exact truth of one read set: every retained event of every read placed on the reference, through the
-# basecaller's move table and two aligners. Training labels and ours' evaluation sequence read it.
+# basecaller's move table and two aligners. The training labels and HARICOT's evaluation sequence read it.
 #
 #   truth/truth.sh READS.pod5 CALLS.bam REF.fa OUT [--threads N] [--bin-dir DIR] [--python PY]
 #

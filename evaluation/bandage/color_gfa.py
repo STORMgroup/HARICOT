@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
-"""Bandage colour table for a sequence graph (Flye's assembly_graph.gfa, Rawsamble's asm.gfa, a FASTA as GFA).
+"""Bandage colour table for an assembly graph (HARICOT's unitigs.gfa, Flye's assembly_graph.gfa, Rawsamble's asm.gfa,
+wtdbg2's contigs as a GFA).
 
 A segment's position is the reference midpoint of its longest primary alignment block (minimap2
 PAF of the segment sequences to the reference). Hue ramps 0 -> 0.85 along --contig, the same scale
 for every tool of a dataset.
-Segments placed on another contig are dark grey; unplaced segments light grey.
+Segments placed on another contig are dark grey; unplaced segments light grey. panels.sh runs it.
 
-Usage: color_gfa.py SEGMENTS.paf --gfa G.gfa --fai contigs.tsv --contig NAME --out colors.csv
+Usage: color_gfa.py SEGMENTS.paf --gfa G.gfa --fai REF.fa.fai --contig NAME --out colors.csv
 """
 import argparse
 import colorsys
 
 
 def main():
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("paf")
     ap.add_argument("--gfa", required=True)
     ap.add_argument("--fai", required=True)

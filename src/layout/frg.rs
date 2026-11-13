@@ -12,12 +12,10 @@
 //! Why it matters: a branching node is where a unitig stops -- a braid, a collapsed repeat, the
 //! junction a chimeric read welds -- and the node graph only knows pairwise adjacency there. A read
 //! that runs from one fragment into the next is molecule-level evidence of the continuation, and
-//! reads are 20-40 kb where branch regions are a few nodes. Measured with a prototype from
-//! correct overlaps of A. thaliana chr4 30x: 5.2 -> 14.6 Mb; on 33 bacterial sets: 60.8 -> 73.3%
-//! of the 1 kb oracle.
+//! reads are 20-40 kb where branch regions are a few nodes.
 //!
 //! Needs the reads' node placements after cleaning: [`FuzzyGraph::read_threads`], recorded by the
-//! build when `GraphParams::frg_layout` (or `read_threading`) is on. Placements on nodes that
+//! build when `GraphParams::frg_layout` is on. Placements on nodes that
 //! cleaning removed or merged away are skipped. Forward-strand only, like the rest of the pipeline.
 //!
 //! Simplifications of wtdbg2's pass list (`wtdbg.c:1145-1186`): its link offsets, binary-link cut,
@@ -33,25 +31,15 @@ use crate::graph::ends::{End, EndAdj};
 use crate::graph::fbg::Dir;
 use crate::layout::unitig::Unitig;
 
-/// Which fragment pairs one read links.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LinkMode {
-    /// wtdbg2's rule (`scan_rd_lnk_core`): one link per read, from the first fragment it visits to
-    /// the last. Intermediate adjacencies come from other reads; the transitive reduction removes
-    /// the long link again when they exist.
-    FirstLast,
-    /// Every consecutive pair of fragments the read visits.
-    Consecutive,
-}
-
-/// Parameters of the fragment layout.
+/// Parameters of the fragment layout. A read links the first fragment it visits to the last
+/// (wtdbg2's rule, `scan_rd_lnk_core`): intermediate adjacencies come from other reads; the
+/// transitive reduction removes the long link again when they exist.
 #[derive(Debug, Clone, Copy)]
 pub struct FrgParams {
     /// A link carried by fewer reads is weak, and cut where its fragment end has other links.
     /// wtdbg2 uses its node-coverage minimum (`max_node_cov_sg = node_cov`, `wtdbg.c:966`): 3 by
     /// default, 2 when a genome size puts the depth at <= 40x (`wtdbg.c:923-932`).
     pub weak: u32,
-    pub links: LinkMode,
     /// A fragment of at most this many nodes, linked on one side only, into a fragment end that
     /// has other links, is a tip and loses its link.
     pub tip_nodes: usize,
@@ -61,7 +49,6 @@ impl Default for FrgParams {
     fn default() -> Self {
         FrgParams {
             weak: 3,
-            links: LinkMode::FirstLast,
             tip_nodes: 2,
         }
     }
@@ -103,7 +90,6 @@ pub fn frg_contigs(graph: &FuzzyGraph, p: &FrgParams) -> (Vec<Unitig>, FrgStats)
             && (e.from_dir != Dir::Fwd || e.to_dir != Dir::Fwd)
     });
     if reversed || graph.read_threads().is_empty() {
-        log::warn!("frg layout: reversed edges or no read placements; plain unitigs instead");
         return (crate::layout::gen_unitigs(graph), st);
     }
     let ends = EndAdj::new(graph);
@@ -178,10 +164,10 @@ pub fn frg_contigs(graph: &FuzzyGraph, p: &FrgParams) -> (Vec<Unitig>, FrgStats)
                 _ => seq.push((f, i, i)),
             }
         }
-        let pairs: Vec<(Visit, Visit)> = match p.links {
-            LinkMode::FirstLast if seq.len() >= 2 => vec![(seq[0], seq[seq.len() - 1])],
-            LinkMode::FirstLast => Vec::new(),
-            LinkMode::Consecutive => seq.windows(2).map(|w| (w[0], w[1])).collect(),
+        let pairs: Vec<(Visit, Visit)> = if seq.len() >= 2 {
+            vec![(seq[0], seq[seq.len() - 1])]
+        } else {
+            Vec::new()
         };
         for ((fa, _, a_hi), (fb, b_lo, _)) in pairs {
             if fa != fb && a_hi + 1 + END_SLACK >= frgs[fa].len() && b_lo <= END_SLACK {
@@ -374,29 +360,24 @@ mod tests {
 
     #[test]
     fn reads_link_fragments_through_a_masked_repeat() {
-        for mode in [LinkMode::FirstLast, LinkMode::Consecutive] {
-            for weak in [false, true] {
-                let (g, [a1, a2, a3, x, b1, b2, d1, d2, c1, c2]) = repeat_graph(weak);
-                let p = FrgParams {
-                    links: mode,
-                    ..FrgParams::default()
-                };
-                let (us, st) = frg_contigs(&g, &p);
-                assert_eq!(st.masked, 1);
-                assert_eq!(
-                    contig_sets(&us),
-                    vec![vec![a1, a2, a3, b1, b2], vec![x], vec![d1, d2, c1, c2]],
-                    "{mode:?} weak={weak}"
-                );
-                assert_eq!(st.weak_cut, usize::from(weak));
-                // Partition: every live node exactly once.
-                let mut all: Vec<u32> = us
-                    .iter()
-                    .flat_map(|u| u.nodes.iter().map(|x| x.0))
-                    .collect();
-                all.sort_unstable();
-                assert_eq!(all, (0..10).collect::<Vec<u32>>());
-            }
+        for weak in [false, true] {
+            let (g, [a1, a2, a3, x, b1, b2, d1, d2, c1, c2]) = repeat_graph(weak);
+            let p = FrgParams::default();
+            let (us, st) = frg_contigs(&g, &p);
+            assert_eq!(st.masked, 1);
+            assert_eq!(
+                contig_sets(&us),
+                vec![vec![a1, a2, a3, b1, b2], vec![x], vec![d1, d2, c1, c2]],
+                "weak={weak}"
+            );
+            assert_eq!(st.weak_cut, usize::from(weak));
+            // Partition: every live node exactly once.
+            let mut all: Vec<u32> = us
+                .iter()
+                .flat_map(|u| u.nodes.iter().map(|x| x.0))
+                .collect();
+            all.sort_unstable();
+            assert_eq!(all, (0..10).collect::<Vec<u32>>());
         }
     }
 

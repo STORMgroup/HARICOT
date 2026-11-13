@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Metamorphic inputs: a NEW pod5 with SRC's
-reads changed in one way, and the map from its read ids back to SRC's. SRC is only read.
+"""Metamorphic inputs: a NEW pod5 with SRC's reads changed in one way, and the map from its read ids back to SRC's.
+SRC is only read. invariance.sh runs --mode renr; the other modes are for further checks by hand.
 
   --mode unc   the same reads in the same order, the signal stored uncompressed (another file layout)
   --mode reno  every read id replaced by a new random UUID, the ORDER of the ids preserved (the sorted new ids go to
@@ -35,7 +35,7 @@ def new_ids(rng, n):
 
 
 def main():
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("src")
     ap.add_argument("--mode", required=True, choices=["unc", "reno", "renr", "dupn", "dups"])
     ap.add_argument("--seed", type=int, default=1)

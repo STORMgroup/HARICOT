@@ -4,10 +4,9 @@
 //!   1. low-coverage edge filter
 //!   2. transitive reduction (`myers_transitive_reduction_graph`, line 1877)
 //!   3. tip trimming                (`trim_tips_graph`,            line 2381)
-//!   4. bubble popping              (`pop_bubbles_graph`,          line 2763): the
-//!      per-end two-arm popper [`pop_bubbles`], or with `branched_bubbles` wtdbg2's
-//!      branched popper [`pop_branched_bubbles`] (`haricot assemble` uses 2: its unsafe
-//!      mode too, alternated with tip trimming to convergence)
+//!   4. bubble popping              (`pop_bubbles_graph`,          line 2763): wtdbg2's
+//!      branched popper [`pop_branched_bubbles`], safe in the rounds, then its unsafe
+//!      mode alternated with tip trimming to convergence
 //!
 //! [`clean`] also runs [`merge_parallel_nodes`] each round, which has no wtdbg2
 //! counterpart — see its doc comment — and the relative edge gate
@@ -22,7 +21,7 @@
 //! **convergence** (both edges on one end, nothing on the other), and walking
 //! through one traces a path that does not exist. See `ends.rs` for the argument.
 //!
-//! [`n_components`] and the `deg(n) == 1` dead-end test still use the undirected
+//! `n_components` and the `deg(n) == 1` dead-end test still use the undirected
 //! [`FuzzyGraph::live_adjacency`], which is correct: connectivity and "how many
 //! edges does this node have at all" are genuinely undirected notions.
 //!
@@ -58,8 +57,7 @@ pub fn filter_weak_edges(graph: &mut FuzzyGraph, params: &GraphParams) -> usize 
         return 0;
     }
     let f = params.min_edge_support as f64;
-    // `support` is the read count (see `Node::support`); only `threading::unzip` sets it
-    // otherwise, to its copies' share.
+    // `support` is the read count (see `Node::support`).
     let sup: Vec<f64> = graph.nodes().iter().map(|n| n.support as f64).collect();
     let del: Vec<bool> = graph.nodes().iter().map(|n| n.del).collect();
     let before = graph.n_edges();
@@ -100,7 +98,7 @@ fn step_len(node_events: u32, offset: i32) -> i64 {
 /// `GraphParams` alone cannot know `bin_events`. Taking it from the node also keeps
 /// the step length per-edge.
 ///
-/// **Orientation-aware** ([`EndAdj`], see [`has_alt_path`]): the alternate path
+/// **Orientation-aware** ([`EndAdj`], see `has_alt_path`): the alternate path
 /// must leave `u` by the end the chord leaves and arrive at `w` by the end the
 /// chord arrives, traversing every intermediate node end-to-end. An undirected
 /// search can justify deleting a real edge with a path that turns around inside a
@@ -468,113 +466,6 @@ pub fn trim_tips(graph: &mut FuzzyGraph, params: &GraphParams) -> usize {
     removed
 }
 
-/// Pop bubbles: collapse short alternative paths between the same two endpoints.
-///
-/// Port of `pop_bubbles_graph` (`wtdbg-graph.h:2763`), simplified to the common
-/// **simple bubble**: a source `s` that branches, from which two internally
-/// unbranched paths reconverge at the same node `t` within `bubble_steps`. The
-/// lower-coverage side's interior nodes are removed (the surviving side keeps the
-/// stronger consensus). Iterated to convergence.
-///
-/// **Orientation-aware** ([`EndAdj`]): a branch is traced with `step_out`, and a
-/// node is interior only if it is a true chain interior (one edge on *each* end).
-/// Undirected degree would walk through a convergence — two edges on one end — and
-/// so trace paths that do not exist, then delete their interiors as the weaker arm
-/// of a "bubble". A source must branch on a *single* end (`deg(end) >= 2`);
-/// undirected degree ≥ 3 both over-counts (a node with one edge per end has nothing
-/// to branch) and misses a pure convergence (deg 2 on one end, which IS a branch
-/// point).
-pub fn pop_bubbles(graph: &mut FuzzyGraph, params: &GraphParams) -> usize {
-    let mut removed = 0usize;
-    loop {
-        let ends = EndAdj::new(graph);
-        let mut popped_any = false;
-        let mut to_remove: FxHashSet<u32> = FxHashSet::default();
-
-        'src: for s in 0..graph.n_nodes() as u32 {
-            if !graph.is_live(s) {
-                continue;
-            }
-            for send in [End::L, End::R] {
-                if ends.deg(s, send) < 2 {
-                    continue; // s does not branch on this end
-                }
-                // Trace each branch leaving THIS end of s to its first
-                // non-chain-interior node. Record exit -> (branch_interior,
-                // cov_sum); two branches sharing an exit form a bubble.
-                //
-                // `exits` MUST be scoped per end. A bubble is two arms leaving the
-                // SAME end of s and reconverging; arms leaving opposite ends are
-                // just the chain continuing both ways, and if they happen to meet
-                // (a cycle through s) sharing one map calls it a bubble and deletes
-                // an arm's interior, breaking the cycle.
-                //
-                // It is keyed on `(exit node, entry end)`, not the bare node id, for
-                // the mirror-image reason: two arms off the same end of s can arrive
-                // at OPPOSITE ends of the same node t, which is a cycle through t,
-                // not a bubble. A bubble's arms must re-enter t by the *same* end.
-                let mut exits: FxHashMap<(u32, End), (Vec<u32>, u64)> = FxHashMap::default();
-                for &(first, fem, _ei) in ends.at(s, send) {
-                    let mut interior: Vec<u32> = Vec::new();
-                    let mut cov_sum = 0u64;
-                    let mut steps = 0u32;
-                    let mut cur = (first, if fem == End::L { Dir::Fwd } else { Dir::Rev });
-                    loop {
-                        if to_remove.contains(&cur.0) {
-                            break;
-                        }
-                        cov_sum += graph.nodes()[cur.0 as usize].cov as u64;
-                        if !ends.is_chain_interior(cur.0) || cur.0 == s {
-                            // exit node (junction or dead end) — close this branch.
-                            if cur.0 != s && steps >= 1 {
-                                // We arrive at `cur.0` oriented `cur.1`, so the end
-                                // we re-enter by is `entry_end(cur.1)`.
-                                let exit_key = (cur.0, entry_end(cur.1));
-                                if let Some(prev_branch) = exits.get(&exit_key) {
-                                    // Two branches from s meet at the same exit:
-                                    // a bubble. Remove the weaker interior.
-                                    let (ref pa, ca) = *prev_branch;
-                                    let (this_int, cb) = (interior.clone(), cov_sum);
-                                    let weaker = if ca <= cb { pa.clone() } else { this_int };
-                                    if !weaker.is_empty() {
-                                        for n in weaker {
-                                            to_remove.insert(n);
-                                        }
-                                        popped_any = true;
-                                        continue 'src;
-                                    }
-                                } else {
-                                    exits.insert(exit_key, (interior.clone(), cov_sum));
-                                }
-                            }
-                            break;
-                        }
-                        interior.push(cur.0);
-                        steps += 1;
-                        if steps > params.bubble_steps {
-                            break;
-                        }
-                        match ends.step_out(cur.0, cur.1) {
-                            Some((m, dm, _)) => cur = (m, dm),
-                            None => break,
-                        }
-                    }
-                }
-            }
-        }
-
-        if to_remove.is_empty() || !popped_any {
-            break;
-        }
-        for n in &to_remove {
-            graph.remove_node(*n);
-        }
-        graph.prune_dangling_edges();
-        removed += to_remove.len();
-    }
-    removed
-}
-
 /// One search entry of [`branched_bubble_at`]: wtdbg2's `bt_t` (`wtdbg-graph.h:2498`), an
 /// arrival at `node` by `edge`, `step` edges from the source.
 #[derive(Debug, Clone, Copy)]
@@ -792,7 +683,7 @@ fn cut_bubble_arms(
     (cut, bts[1..].iter().map(|b| b.node).collect())
 }
 
-/// Pop every bubble wtdbg2's popper finds ([`branched_bubble_at`] from each node end),
+/// Pop every bubble wtdbg2's popper finds (`branched_bubble_at` from each node end),
 /// iterated to convergence. Regions popped in one pass do not overlap (a search touching
 /// an already-popped region is abandoned until the next pass). After the cuts, the
 /// popped arms left without a connection to anything outside them are deleted -- wtdbg2
@@ -881,47 +772,35 @@ pub fn clean(graph: &mut FuzzyGraph, params: &GraphParams) -> (usize, usize, usi
     let mut reduced = 0;
     let mut tips = 0;
     let mut bubbles = 0;
-    let mut merged = 0;
-    let mut weak = 0;
     for _ in 0..4 {
         // Collapse parallel double-tilings first so reduction/tip/bubble work on a
         // de-duplicated graph, then again each round as new parallels are exposed.
-        merged += merge_parallel_nodes(graph);
+        merge_parallel_nodes(graph);
         // Relative edge gate ahead of reduction: it changes which chords exist, and
         // it is re-run each round because tip/bubble removal changes which nodes are
         // live (and `merge_parallel_nodes` rewrites the representative's coverage).
-        weak += filter_weak_edges(graph, params);
+        filter_weak_edges(graph, params);
         reduced += transitive_reduction(graph, params);
         tips += trim_tips(graph, params);
-        bubbles += match params.branched_bubbles {
-            0 => pop_bubbles(graph, params),
-            _ => pop_branched_bubbles(graph, params, true),
-        };
+        bubbles += pop_branched_bubbles(graph, params, true);
     }
     // wtdbg2 turns its popper's unsafe mode on once the safe passes find nothing more,
     // alternating it with tip trimming to convergence (`wtdbg.c:1080-1110`).
-    if params.branched_bubbles >= 2 {
-        loop {
-            let t = trim_tips(graph, params);
-            let b = pop_branched_bubbles(graph, params, false);
-            tips += t;
-            bubbles += b;
-            if t + b == 0 {
-                break;
-            }
+    loop {
+        let t = trim_tips(graph, params);
+        let b = pop_branched_bubbles(graph, params, false);
+        tips += t;
+        bubbles += b;
+        if t + b == 0 {
+            break;
         }
     }
     graph.prune_dangling_edges();
-    log::info!(
-        "clean: merge_parallel removed {merged} nodes, transitive_reduction removed {reduced} \
-         edges, edge-cov filter removed {filtered}, relative edge-support filter removed {weak} \
-         edges, trim_tips removed {tips} nodes, pop_bubbles removed {bubbles} (nodes; bubbles if branched_bubbles={bb})",
-        bb = params.branched_bubbles
-    );
     (filtered, reduced, tips, bubbles)
 }
 
 /// Number of connected components over live nodes (helper for tests/diagnostics).
+#[cfg(test)]
 pub fn n_components(graph: &FuzzyGraph) -> usize {
     let adj = graph.live_adjacency();
     let mut seen: FxHashSet<u32> = FxHashSet::default();
@@ -991,8 +870,6 @@ mod tests {
             }
             (g, n)
         };
-        let (mut g, _) = braid();
-        assert_eq!(pop_bubbles(&mut g, &p), 0, "the simple port sees no bubble");
         let (mut g, n) = braid();
         assert_eq!(pop_branched_bubbles(&mut g, &p, true), 1);
         let live: Vec<u32> = n.iter().copied().filter(|&x| g.is_live(x)).collect();
@@ -1258,32 +1135,6 @@ mod tests {
         assert_eq!(super::n_components(&g), 1);
     }
 
-    /// A simple bubble (two parallel interiors between s and t) collapses to one.
-    #[test]
-    fn bubble_is_popped() {
-        let mut g = FuzzyGraph::new();
-        // s=0, t=3, path A: 0-1-3 (cov hi), path B: 0-2-3 (cov lo).
-        g.add_node(3, 72); // 0
-        g.add_node(5, 72); // 1 (strong)
-        g.add_node(1, 72); // 2 (weak)
-        g.add_node(3, 72); // 3
-        // give s and t degree >=3 so they read as junctions
-        g.add_node(3, 72); // 4 extra neighbor of 0
-        g.add_node(3, 72); // 5 extra neighbor of 3
-        g.add_edge(e(0, 1, 3, 0));
-        g.add_edge(e(1, 3, 3, 0));
-        g.add_edge(e(0, 2, 1, 0));
-        g.add_edge(e(2, 3, 1, 0));
-        g.add_edge(e(0, 4, 3, 0));
-        g.add_edge(e(3, 5, 3, 0));
-        let mut p = Params::r10_4_1().graph;
-        p.bubble_steps = 40;
-        let removed = pop_bubbles(&mut g, &p);
-        assert_eq!(removed, 1, "the weak interior node 2 should be removed");
-        assert!(!g.is_live(2));
-        assert!(g.is_live(1), "the strong interior survives");
-    }
-
     /// Parallel arms of an embedded bubble merge into one node; the source/sink
     /// (whose flanks are the deg-2 arms) must not be merged.
     #[test]
@@ -1414,113 +1265,5 @@ mod tests {
             (2..=6).all(|n| g.is_live(n)),
             "the junction and its backbone survive"
         );
-    }
-
-    fn ed(from: u32, fd: Dir, to: u32, td: Dir, cov: u32) -> Edge {
-        Edge {
-            from,
-            from_dir: fd,
-            to,
-            to_dir: td,
-            cov,
-            support: cov as f32,
-            offset: 0,
-        }
-    }
-
-    /// REGRESSION: arms leaving OPPOSITE ends of the source are not a bubble. A
-    /// bubble is two arms off the SAME end that reconverge; arms off opposite ends
-    /// are the chain continuing in both directions, and if they meet (a cycle
-    /// through s) they must be left alone.
-    ///
-    /// `exits` was declared outside the `for send in [L, R]` loop, so the L-arm and
-    /// the R-arm collided on their shared exit and one interior was deleted,
-    /// breaking the cycle.
-    ///
-    /// Node 0 branches on BOTH ends (L -> 1,2 ; R -> 3,4). Interiors 1 and 3 both
-    /// reach exit 5. Only a per-end `exits` keeps them apart.
-    #[test]
-    fn arms_off_opposite_ends_are_not_a_bubble() {
-        let p = Params::r10_4_1().graph;
-        let mut g = FuzzyGraph::new();
-        for _ in 0..7 {
-            g.add_node(5, 80);
-        }
-        g.add_edge(ed(1, Dir::Fwd, 0, Dir::Fwd, 9)); // 1R -> 0L
-        g.add_edge(ed(2, Dir::Fwd, 0, Dir::Fwd, 3)); // 2R -> 0L   (dead-end arm)
-        g.add_edge(ed(0, Dir::Fwd, 3, Dir::Fwd, 9)); // 0R -> 3L
-        g.add_edge(ed(0, Dir::Fwd, 4, Dir::Fwd, 3)); // 0R -> 4L   (dead-end arm)
-        g.add_edge(ed(5, Dir::Fwd, 1, Dir::Fwd, 9)); // 5R -> 1L
-        g.add_edge(ed(3, Dir::Fwd, 5, Dir::Fwd, 9)); // 3R -> 5L
-        g.add_edge(ed(5, Dir::Fwd, 6, Dir::Fwd, 9)); // 5R -> 6L  (makes 5 a junction)
-
-        let removed = pop_bubbles(&mut g, &p);
-        assert_eq!(
-            removed, 0,
-            "1 (off 0's L end) and 3 (off 0's R end) share exit 5, but they are not \
-             a bubble — they are opposite directions of one chain"
-        );
-        assert!(
-            g.is_live(1) && g.is_live(3),
-            "neither interior may be popped"
-        );
-    }
-
-    /// REGRESSION: the mirror image of the test above, at the *arrival* end. Both
-    /// arms leave the SAME end of 0 (its L end), but reach node 5 by OPPOSITE ends
-    /// — 1 lands on 5's L, 2 lands on 5's R. That is a cycle passing through 5, not
-    /// a bubble: a bubble's arms must re-enter the exit by the same end. Keying
-    /// `exits` on the bare node id calls it a bubble and pops a real chain interior.
-    #[test]
-    fn arms_arriving_at_opposite_ends_of_one_exit_are_not_a_bubble() {
-        let p = Params::r10_4_1().graph;
-        let mut g = FuzzyGraph::new();
-        for _ in 0..7 {
-            g.add_node(5, 80);
-        }
-        g.add_edge(ed(1, Dir::Fwd, 0, Dir::Fwd, 3)); // 1R -> 0L
-        g.add_edge(ed(2, Dir::Fwd, 0, Dir::Fwd, 9)); // 2R -> 0L   (same end of 0)
-        g.add_edge(ed(5, Dir::Rev, 1, Dir::Fwd, 3)); // 5L -- 1L   (arrives at 5's L)
-        g.add_edge(ed(5, Dir::Fwd, 2, Dir::Fwd, 9)); // 5R -> 2L   (arrives at 5's R)
-        g.add_edge(ed(6, Dir::Fwd, 5, Dir::Fwd, 9)); // 6R -> 5L
-
-        let removed = pop_bubbles(&mut g, &p);
-        assert_eq!(
-            removed, 0,
-            "arms off 0's L end arrive at OPPOSITE ends of 5 — a cycle, not a bubble"
-        );
-        assert!(
-            g.is_live(1) && g.is_live(2),
-            "node 1 is a legitimate chain interior and must not be popped"
-        );
-    }
-
-    /// Positive control for the test above: when two arms off the same end of 0 do
-    /// arrive at the SAME end of the exit, that IS a bubble and the weaker arm pops.
-    /// Guards the `(node, entry end)` key against never matching.
-    ///
-    /// Arm strength is the sum of NODE coverage along the arm (not edge cov), so
-    /// the two interiors are given different node covs.
-    #[test]
-    fn arms_arriving_at_the_same_end_of_one_exit_are_a_bubble() {
-        let p = Params::r10_4_1().graph;
-        let mut g = FuzzyGraph::new();
-        g.add_node(5, 80); // 0: source junction
-        g.add_node(9, 80); // 1: strong arm interior
-        g.add_node(3, 80); // 2: weak arm interior
-        g.add_node(5, 80); // 3: exit junction
-        g.add_node(5, 80); // 4: continuation past the exit
-        g.add_node(5, 80); // 5: continuation before the source
-        g.add_edge(ed(0, Dir::Fwd, 1, Dir::Fwd, 9)); // 0R -> 1L
-        g.add_edge(ed(0, Dir::Fwd, 2, Dir::Fwd, 3)); // 0R -> 2L   (same end of 0)
-        g.add_edge(ed(1, Dir::Fwd, 3, Dir::Fwd, 9)); // 1R -> 3L   (both arrive at
-        g.add_edge(ed(2, Dir::Fwd, 3, Dir::Fwd, 3)); // 2R -> 3L    3's L end)
-        g.add_edge(ed(3, Dir::Fwd, 4, Dir::Fwd, 9)); // 3R -> 4L  (3 is a junction)
-        g.add_edge(ed(5, Dir::Fwd, 0, Dir::Fwd, 9)); // 5R -> 0L  (0 is a junction)
-
-        let removed = pop_bubbles(&mut g, &p);
-        assert_eq!(removed, 1, "a real bubble: the weaker arm pops");
-        assert!(!g.is_live(2), "arm 2 (cov 3) is weaker than arm 1 (cov 9)");
-        assert!(g.is_live(1), "the stronger arm survives");
     }
 }

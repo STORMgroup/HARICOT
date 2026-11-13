@@ -1,9 +1,4 @@
-//! Raw-signal input.
-//!
-//! **pod5 is the primary, always-available format** (pure-Rust reader via the
-//! `pod5lib` crate). fast5 support is optional and compiled in only with the
-//! `fast5` cargo feature (which pulls in the HDF5-backed `hdf5-metno` crate and
-//! a system `libhdf5`), and its reader is not implemented (it bails).
+//! Raw-signal input: pod5 files (pure-Rust reader via the `pod5lib` crate).
 
 use std::path::Path;
 
@@ -18,66 +13,14 @@ pub struct RawRead {
     pub signal_pa: Vec<f32>,
 }
 
-/// Read every read from a pod5 file.
-///
-/// Uses `signal_pa()` so the calibration (offset/scale) is applied by
-/// `pod5lib`, matching RawHash2's conversion to pA before normalization.
-pub fn read_pod5(path: &Path) -> Result<Vec<RawRead>> {
-    read_pod5_limit(path, None)
-}
-
-/// [`read_pod5`], stopping after `limit` reads.
-///
-/// The stop is *during* decoding, not a `truncate` afterwards, so a read-count
-/// ladder rung really is a smaller dataset: on the 8.3 GB D. melanogaster pod5 a
-/// post-hoc truncate still paid the full ~32 GB signal allocation, which the
-/// allocator does not return to the OS and which then floors every rung's peak RSS.
-pub fn read_pod5_limit(path: &Path, limit: Option<usize>) -> Result<Vec<RawRead>> {
-    use pod5lib::Reader;
-
-    let reader = Reader::open(path).map_err(|e| anyhow!("opening pod5 {}: {e}", path.display()))?;
-
-    let cap = limit.map_or(reader.len(), |n| n.min(reader.len()));
-    let mut reads = Vec::with_capacity(cap);
-    for read in reader.reads_iter() {
-        if limit.is_some_and(|n| reads.len() >= n) {
-            break;
-        }
-        let signal_pa = read
-            .signal_pa()
-            .map_err(|e| anyhow!("decoding signal in {}: {e}", path.display()))?;
-        reads.push(RawRead {
-            id: read.read_id_str().to_string(),
-            signal_pa,
-        });
-    }
-    Ok(reads)
-}
-
-/// Read every read from a fast5 file (requires the `fast5` feature).
-#[cfg(feature = "fast5")]
-pub fn read_fast5(path: &Path) -> Result<Vec<RawRead>> {
-    // TODO: implement using `hdf5-metno`. Per RawHash2 `ri_read_sig_fast5`
-    // (rsig.c:334), read `{raw_path}/Signal` and the channel_id attributes
-    // (digitisation, range, offset), then convert:
-    //     pa = (sample + offset) * (range / digitisation)
-    let _ = path;
-    bail!("fast5 reading is not yet implemented (the feature is enabled but unimplemented)")
-}
-
-#[cfg(not(feature = "fast5"))]
-pub fn read_fast5(_path: &Path) -> Result<Vec<RawRead>> {
-    bail!("fast5 support is not compiled in; rebuild with `--features fast5`")
-}
-
 /// Hand each read to `f` as it is decoded, never materialising the whole file.
 ///
-/// [`read_pod5`] exists to return a `Vec<RawRead>`, which makes the entire signal live
+/// Returning a `Vec<RawRead>` would make the entire signal live
 /// at once — the single largest term in peak RSS (32.65 GB of D. melanogaster fwd's
 /// 49.40 GB). Callers that only need to *transform* each read (sketching, counting) can
 /// consume it a read at a time instead and keep the signal's footprint constant.
 ///
-/// Same reads in the same order as [`read_pod5_limit`], so `read_id` assignment by
+/// The reads in file order, so `read_id` assignment by
 /// arrival index is unchanged.
 pub fn for_each_raw_read<F>(path: &Path, limit: Option<usize>, mut f: F) -> Result<()>
 where
@@ -105,14 +48,10 @@ where
             }
             Ok(())
         }
-        // fast5 has no streaming path (and no reader at all yet); fall back to the
-        // whole-file read so behaviour matches rather than silently differing.
-        _ => {
-            for r in read_signals_limit(path, limit)? {
-                f(r)?;
-            }
-            Ok(())
-        }
+        other => bail!(
+            "unrecognized signal file extension {:?} (expected .pod5)",
+            other
+        ),
     }
 }
 
@@ -175,15 +114,6 @@ impl AdcRead {
     pub fn signal_pa(&self) -> Vec<f32> {
         self.calibration.to_pa(&self.adc)
     }
-
-    /// Number of samples.
-    pub fn len(&self) -> usize {
-        self.adc.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.adc.is_empty()
-    }
 }
 
 /// [`for_each_raw_chunk`] for pod5 files with [`AdcRead`] chunks: the same reads in the same order and
@@ -244,21 +174,4 @@ where
         // A consumer error stops the producer too; report the consumer's.
         consumed.and(produced)
     })
-}
-
-/// Dispatch on file extension. `.pod5` -> pod5; `.fast5`/`.f5` -> fast5.
-pub fn read_signals(path: &Path) -> Result<Vec<RawRead>> {
-    read_signals_limit(path, None)
-}
-
-/// [`read_signals`], stopping after `limit` reads (pod5 only; fast5 ignores it).
-pub fn read_signals_limit(path: &Path, limit: Option<usize>) -> Result<Vec<RawRead>> {
-    match path.extension().and_then(|e| e.to_str()) {
-        Some("pod5") => read_pod5_limit(path, limit),
-        Some("fast5") | Some("f5") => read_fast5(path),
-        other => bail!(
-            "unrecognized signal file extension {:?} (expected .pod5 or .fast5)",
-            other
-        ),
-    }
 }

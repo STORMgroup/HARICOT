@@ -4,11 +4,11 @@
 
 Per row: QUAST on the main contig, contigs >= 1 kb (contigs, largest contig, NG50, NGA50, misassemblies, genome
 fraction; pat_NGA50: against the paternal copy, where scored), the graph's connected components (components.py),
-elapsed / CPU time and peak memory summed over the tool's timed steps, failed steps, and Rawsamble's miniasm protocol
-(PLAIN / DEVIATION / FAIL). Rows: ours_seq (HARICOT), flye, wtdbg2, wtd_lay (wtdbg2's layout without consensus; wtdbg2's
-times), rawsamble, and wtdbg2_L0 where it ran.
+elapsed and CPU time summed over the tool's timed steps, the peak memory of its largest step (GiB), the failed steps,
+and Rawsamble's miniasm protocol (PLAIN / DEVIATION / FAIL). Rows: ours_seq (HARICOT), flye, wtdbg2, wtd_lay (wtdbg2's
+layout without consensus; wtdbg2's times), rawsamble, and wtdbg2_L0 where it ran.
 
-Usage: table.py ROOT KEY [KEY ...] --out table.tsv     (ROOT/KEY: one set's runs, ROOT/KEY/score: its scoring)
+Usage: table.py ROOT SET [SET ...] --out table.tsv     (ROOT/SET: one set's runs, ROOT/SET/score: its scoring)
 """
 import argparse
 import csv
@@ -94,7 +94,7 @@ def rows(root, key):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("root")
-    ap.add_argument("keys", nargs="+")
+    ap.add_argument("keys", nargs="+", metavar="SET")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
     out = [r for k in a.keys for r in rows(a.root, k)]

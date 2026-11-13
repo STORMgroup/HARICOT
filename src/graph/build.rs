@@ -1,4 +1,4 @@
-//! Fuzzy-Bruijn-graph construction from bin-DP overlaps.
+//! Fuzzy de Bruijn graph construction from the overlaps' bin paths.
 //!
 //! A port of wtdbg2's node/edge build (`extern/wtdbg2/wtdbg.h`), working entirely in **bins**. The
 //! domain change vs wtdbg2: a bin is `bin_events` events (not 256 bp), and a node
@@ -6,7 +6,7 @@
 //! `node_bins * bin_events` events.
 //!
 //! K is the parameter and is never re-derived from a length: `K = round(node_events
-//! / bin_events)` is exactly the inference [`Grid`] exists to eliminate, because it
+//! / bin_events)` is exactly the inference `Grid` exists to eliminate, because it
 //! silently reinterprets a node whenever `bin_events` changes (wtdbg2 converts once,
 //! `wtdbg.c:638-640`, after which `reglen` *is* K). `--node-events` survives only as
 //! a deprecated alias that rounds up to a whole bin and warns.
@@ -173,14 +173,16 @@ fn emit_grid_regions(
     }
 }
 
-/// Build the fuzzy-Bruijn graph from bin-DP overlaps. Node extent comes from the
+/// Build the fuzzy de Bruijn graph from the overlaps' bin paths. Node extent comes from the
 /// overlaps alone.
+#[cfg(test)]
 pub fn build_graph(overlaps: &[Overlap], params: &GraphParams) -> FuzzyGraph {
     build_graph_annotated(overlaps, params).0
 }
 
 /// Like [`build_graph`] but also returns per-node provenance ([`NodeAnno`]),
 /// indexed by node id, for diagnostics and reference-position coloring.
+#[cfg(test)]
 pub fn build_graph_annotated(
     overlaps: &[Overlap],
     params: &GraphParams,
@@ -196,6 +198,7 @@ pub fn build_graph_annotated(
 /// `(read_rank[anchor], window)` instead, so the commit order, the node ids (assigned in commit order)
 /// and every pass after the build that iterates nodes or edges by id do not depend on how the reads
 /// are numbered or named. `None`: ties by the K-bin key.
+#[cfg(test)]
 pub fn build_graph_annotated_ranked(
     overlaps: &[Overlap],
     params: &GraphParams,
@@ -204,7 +207,7 @@ pub fn build_graph_annotated_ranked(
     build_graph_dumping(overlaps, params, read_rank, None)
 }
 
-/// [`build_graph_annotated_ranked`] that also writes the Stage-3 read placements to `threads_dump`
+/// `build_graph_annotated_ranked` that also writes the Stage-3 read placements to `threads_dump`
 /// (`None`: none), as `haricot-layout` writes OUT/threads.tsv. The file is created after Stage 2; an
 /// empty overlap set writes none.
 pub fn build_graph_dumping(
@@ -416,21 +419,13 @@ pub fn build_graph_dumping(
     // edge. ----
     //
     // Deviation from a literal `max_edge_span` gate (wtdbg2's `g->max_edge_span`
-    // check, `wtdbg.h:2053`): by default we connect consecutive committed regions on
+    // check, `wtdbg.h:2053`): we connect consecutive committed regions on
     // a read regardless of the gap between them. Rationale — a read physically spans
     // its own DNA, so two committed loci adjacent in the read's own ordering are
     // contiguous; the intervening "gap" only means no node was committed there (low
     // local coverage or conflict-rejected candidates), not a discontinuity. Capping
-    // the span at `max_edge_span_events=1024` (≈43 bins) instead dropped these
+    // the span at 1024 events (≈43 bins) instead dropped these
     // bridges; each read cluster was then observed to break into 8-14 components.
-    // `max_edge_span_events == 0` selects the bridge-everything behaviour; any
-    // positive value caps the span.
-    // i64 so the "unlimited" sentinel can exceed any realistic gap without wrap.
-    let max_span_bins: i64 = if params.max_edge_span_events == 0 {
-        i64::MAX
-    } else {
-        (params.max_edge_span_events as f64 / bin_events as f64).round() as i64
-    };
     // (from, from_dir, to, to_dir) -> offsets in events
     let mut edge_offsets: HashMap<(u32, u8, u32, u8), Vec<i32>> = HashMap::new();
     for regs in threads.values_mut() {
@@ -441,9 +436,6 @@ pub fn build_graph_dumping(
                 continue;
             }
             let gap_bins = r2.beg as i64 - r1.end as i64;
-            if gap_bins > max_span_bins {
-                continue; // beyond max_edge_span — leave a break
-            }
             let offset = (gap_bins * bin_events as i64) as i32;
             // Orientation is *read order*: r1 precedes r2 along the read, so the
             // edge runs r1 -> r2. Sketching is forward-strand only
@@ -457,9 +449,9 @@ pub fn build_graph_dumping(
             edge_offsets.entry(key).or_default().push(offset);
         }
     }
-    // Read placements (for threading and the fragment layout) and read-threaded triples: the path
-    // context the pairwise reduction below discards.
-    if params.read_threading || params.frg_layout {
+    // Read placements (for the fragment layout): the path context the pairwise reduction below
+    // discards.
+    if params.frg_layout {
         let mut rt = crate::graph::threading::ReadThreads::default();
         for (&rid, regs) in threads.iter() {
             rt.insert(
@@ -475,17 +467,6 @@ pub fn build_graph_dumping(
         }
         g.set_read_threads(rt);
     }
-    if params.read_threading {
-        let mut tr = crate::graph::threading::Transitions::default();
-        for regs in threads.values() {
-            for w in regs.windows(3) {
-                if w[0].node != w[1].node && w[1].node != w[2].node {
-                    *tr.entry((w[0].node, w[1].node, w[2].node)).or_insert(0) += 1;
-                }
-            }
-        }
-        g.set_transitions(tr);
-    }
 
     // Insert in key order: the map's iteration order is randomly seeded, which made the edge
     // ids — and so the GFA's link order — differ from run to run (the content never did).
@@ -493,8 +474,7 @@ pub fn build_graph_dumping(
     edge_offsets.sort_unstable_by_key(|e| e.0);
     for ((from, _fd, to, _td), mut offs) in edge_offsets {
         let cov = offs.len() as u32;
-        // `clean` filters again, so this only bites `--raw`, which skips cleaning —
-        // without it `--min-edge-cov` is a no-op on the raw graph.
+        // `clean` filters again (`filter_low_coverage_edges`).
         if cov < params.min_edge_cov {
             continue;
         }

@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""A depth subset of a POD5 by a salted read-id hash:
-reads with md5("depth:" + id)[:8] / 0xFFFFFFFF < COV / BASE. Order: the first kept read of every run first (the pipeline's
-POD5 reader needs every run in the first record batch), then the other kept reads in the
-source's order.
-Usage: python -I subset.py SRC.pod5 DST.pod5 COV BASE
+"""A depth subset of a POD5, chosen by a salted read-id hash.
+
+Keeps the reads with md5("depth:" + id)[:8] / 0xFFFFFFFF < COV / BASE. Order: the first kept read of every run first
+(the pipeline's POD5 reader needs every run in the first record batch), then the other kept reads in the source's
+order. truth/fragments.sh runs it on the fragment sets; datasets/README.md explains its use for the depth subsets.
+
+Usage: python3 -I subset.py SRC.pod5 DST.pod5 COV BASE
 """
+import argparse
 import hashlib
 import os
 import sys
@@ -13,7 +16,13 @@ import pod5
 
 
 def main():
-    src, dst, cov, base = sys.argv[1], sys.argv[2], float(sys.argv[3]), float(sys.argv[4])
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("src", help="the read set")
+    ap.add_argument("dst", help="the subset's POD5 (written)")
+    ap.add_argument("cov", type=float, help="the subset's depth")
+    ap.add_argument("base", type=float, help="the read set's depth")
+    a = ap.parse_args()
+    src, dst, cov, base = a.src, a.dst, a.cov, a.base
     frac = cov / base
     kept, lead, n = [], {}, 0
     with pod5.Reader(src) as r:

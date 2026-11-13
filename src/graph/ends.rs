@@ -6,7 +6,7 @@
 //!
 //! **Why this module exists.** [`FuzzyGraph::live_adjacency`] collapses that down
 //! to "n is adjacent to m", discarding which end.
-//! [`build_graph_annotated`](crate::graph::build::build_graph_annotated) orients
+//! [`build_graph_dumping`](crate::graph::build::build_graph_dumping) orients
 //! every edge by read order, so the ends carry real information and the undirected
 //! view is lossy in a way that silently invents structure:
 //!
@@ -150,7 +150,7 @@ impl EndAdj {
     /// unbranched. Use this to walk *to* a branch point and learn its identity: at
     /// the node where two paths reconverge the entry end has degree ≥ 2, so `next`
     /// stops one step short and cannot name it.
-    /// [`pop_bubbles`](crate::graph::clean::pop_bubbles) needs the name.
+    /// Tip trimming (`clean::trim_tips`) needs the name.
     pub fn step_out(&self, n: u32, d: Dir) -> Option<(u32, Dir, usize)> {
         let v = self.at(n, exit_end(d));
         if v.len() != 1 {

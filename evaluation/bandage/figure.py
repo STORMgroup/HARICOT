@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Appendix figures: the recorded Bandage panels of the forward-strand top-depth set of every dataset (rows) and tool
+"""Appendix figures: the Bandage panels of the forward-strand top-depth set of every dataset (rows) and tool
 (columns HARICOT, Rawsamble, Flye, wtdbg2), as two separate PDFs for a US-letter manuscript: OUTPREFIX_bacteria.pdf
 (D1-D6) and OUTPREFIX_eukaryotes.pdf (D7-D14), each one grid trimmed to its content (no page, no margins), 6.5 in wide
 (the text width of a letter page with 1 in margins; include with width=\\textwidth), at most 7.9 in tall (a letter page

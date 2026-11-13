@@ -1,4 +1,0 @@
-# local run outputs; a build run inside pipeline/ alone
-out/
-out*/
-target/

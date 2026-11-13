@@ -5,9 +5,7 @@
 //! quantized e-mers, then seeds.
 
 pub mod quantize;
-pub mod select;
 pub mod sketch;
 
-pub use quantize::{dynamic_quantize, normal_quantile, normal_quantile_edges};
-pub use select::{SelectCfg, SketchMethod, select};
+pub use quantize::dynamic_quantize;
 pub use sketch::{QEvent, Seed, hash64, retained_quantized, sketch, sketch_from_retained};

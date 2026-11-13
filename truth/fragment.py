@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
 """Cut reads into contiguous signal fragments of a target BASE length, at exact bases.
 
-A cut every `target_bp * 12.5` samples, with the basecall sliced in proportion, would be
-wrong twice over: the rate varies along a read, and some sets are sampled at 4 kHz, not
-5 kHz. Here every cut is placed at the sample where base `k * L` begins according to the
-parent's dorado move table, so a fragment's signal and its basecall slice describe exactly
-the same bases.
+Every cut is placed at the sample where base `k * L` begins according to the parent's dorado
+move table, so a fragment's signal and its basecall slice describe exactly the same bases. (A
+cut at a fixed number of samples per base would not: the translocation rate varies along a
+read, and the sample rate between sets.)
 
 A fragment keeps the parent's calibration and run metadata; only the signal window and
 the read id differ: `uuid5(NAMESPACE_OID, "<parent>:L<L>:<k>")`. Fragment 0 keeps the
 leading adapter samples and the last fragment keeps any signal beyond the basecalled
-record, exactly as a shorter real read would.
-A trailing fragment with fewer than `--min-frac * L` bases is dropped.
+record, as a shorter real read would. A read with fewer than `--min-frac * L` bases is
+skipped; a remainder shorter than that joins the fragment before it.
 
 Writes:
     DST.pod5         the fragments
-    DST.frag.tsv     frag_id, parent, k, sample_lo, sample_hi, base_lo, base_hi
+    DST.frag.tsv     frag, parent, k, sample_lo, sample_hi, base_lo, base_hi
     DST.fq.gz        fragment basecalls (read orientation)
 
 event_ref.py --frag-map DST.frag.tsv then places each fragment's events through its
 parent's move table and alignments: the truth is inherited, not re-derived.
+truth/fragments.sh runs both.
 
 Usage: fragment.py SRC.pod5 MOVES.bam DST --target-bp 4000 [--min-frac 0.6]
 """

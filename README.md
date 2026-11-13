@@ -34,7 +34,7 @@ way and assembly-aware basecalling techniques that can basecall assembly graphs 
 basecalling.
 
 This repository holds HARICOT and the scripts that reproduce the manuscript's results
-([`docs/REPRODUCE.md`](docs/REPRODUCE.md)).
+([`reproduce/`](reproduce/README.md)).
 
 **At a glance**
 
@@ -84,7 +84,7 @@ tar -xzf haricot-forests-v1.tar.gz        # -> models/
 `haricot assemble` reads the forests from `models/` in the checkout (`--models DIR` reads another directory). It
 checks each file against the published SHA-256: the first line it prints says `forests=published`, or
 `forests=CUSTOM` when a file differs. The forests were trained on five bacteria sequenced at 5 kHz
-([`docs/REPRODUCE.md`](docs/REPRODUCE.md#7-retraining-the-forests)).
+([`reproduce/README.md`](reproduce/README.md#retraining-the-forests)).
 
 ## Usage
 
@@ -111,10 +111,10 @@ kept. The output does not depend on the order of the reads in the file or on the
 
 | set | genome | wall time | peak memory |
 |---|---|---:|---:|
-| `cj_fwd` | *C. jejuni*, 1.8 Mb | 1.3 min | 2.9 GiB |
-| `se_fwd` | *S. enterica*, 4.8 Mb | 3.3 min | 4.7 GiB |
-| `at2_fwd` | *A. thaliana* chr. 2, 19.7 Mb | 15 min | 10.4 GiB |
-| `hg18_fwd` | human HG002 chr. 18, 78.9 Mb | 63 min | 23.8 GiB |
+| `cj_fwd` (D1) | *C. jejuni*, 1.8 Mb | 1.3 min | 2.9 GiB |
+| `se_fwd` (D5) | *S. enterica*, 4.8 Mb | 3.3 min | 4.7 GiB |
+| `at2_fwd` (D7) | *A. thaliana* chr. 2, 19.7 Mb | 15 min | 10.4 GiB |
+| `hg18_fwd` (D14) | human HG002 chr. 18, 78.9 Mb | 63 min | 23.8 GiB |
 
 **Output.** The layout, in signal events: unitigs and contigs as paths of read segments ([Outputs](#outputs)). Bandage
 displays `unitigs.gfa`. The layout carries no sequence. For evaluation, `evaluation/anchor_seq.py` writes each unitig
@@ -124,7 +124,7 @@ as the basecalled bases of its anchor reads. It needs the reads' basecalls with 
 ### Example on public data
 
 This example assembles *H. pylori* 26695 at 6x (856 reads, set `hp2_fwd_c6`) from one 1.9 GB POD5 file of the ONT
-methylation benchmark. It is one of the manuscript's training sets. The data scripts need Python 3 with the `pod5`
+methylation benchmark. It is one of the manuscript's training sets (T3). The data scripts need Python 3 with the `pod5`
 package, which the first command installs.
 
 ```bash
@@ -140,8 +140,8 @@ target/release/haricot assemble hp2_fwd_c6.pod5 -o hp2_asm -t 8
 
 `build_set.py` checks every read's signal against the read list. The assembly takes about 10 s on 8 threads (1.1 GB
 peak memory) and writes 7 unitigs in 5 contigs into `hp2_asm/`. The held-out test sets are in
-`read_lists/final_test/`; [`docs/REPRODUCE.md`](docs/REPRODUCE.md#4-one-test-set-end-to-end) runs the smallest of
-them, from download to QUAST scores.
+`read_lists/final_test/`; [`reproduce/README.md`](reproduce/README.md#one-dataset-end-to-end) runs the smallest
+dataset, from download to QUAST scores.
 
 ## Pipeline
 
@@ -184,67 +184,55 @@ Event ranges count a read's retained events: a run of consecutive events that qu
 | `--keep-work` | keep the intermediate files in `OUT/work` |
 | `--force` | replace `OUT` if it holds an earlier run |
 
-### Other subcommands
-
-| subcommand | what it does |
-|---|---|
-| `haricot baseline READS` | a plain wtdbg2 / RawHash2 baseline (bin-DP overlaps, fuzzy de Bruijn graph, cleaning) as one GFA; not HARICOT's pipeline |
-| `haricot events READS` | segment each read into events; print per-read counts |
-| `haricot sketch READS` | sketch each read into e-mer seeds; print per-read counts (`--dump`: every seed) |
-| `haricot overlap READS` | print the candidate overlaps (bin-DP, or the Hough overlapper with `--hough`) |
-| `haricot info` | print the parameter set |
-
-These subcommands take parameter overrides on top of the R10.4.1 preset (`src/params.rs`); `haricot <subcommand>
---help` lists them.
-
 ## Reproducing the manuscript
 
-[`docs/REPRODUCE.md`](docs/REPRODUCE.md) gives the commands for every step:
+`reproduce/` holds one script per step, from the public raw reads to the results table and the appendix figure. With
+the work directory `R` set in `reproduce/config.sh`, these commands run the smallest dataset (D6, a 10 GB download):
 
-1. Install Rawsamble (RawHash2), Flye, wtdbg2, QUAST and dorado at the manuscript's versions, and download the
-   forests and read lists from Zenodo.
-2. Download the raw reads from their public archives and rebuild each read set, checking every read's signal
-   (`datasets/`).
-3. Basecall the sets and map their signal events to the reference (`truth/`).
-4. Assemble each set with HARICOT, Rawsamble, Flye and wtdbg2 (`haricot assemble`, `evaluation/run_tools.sh`).
-5. Score the assemblies with QUAST, then build the results table and the appendix figure (`evaluation/`).
-6. Optionally, retrain the forests (`training/`) and run the checks (`checks/`).
+```bash
+bash reproduce/0_install.sh     # HARICOT, Rawsamble, Flye, wtdbg2, QUAST, dorado; the forests and read lists
+bash reproduce/run.sh sd        # read sets, basecalls (GPU), truth, the four assemblers, QUAST
+bash reproduce/6_table.sh sd    # the results table and the appendix figure
+```
 
-Section 4 of the guide runs steps 1-5 on one bacterial test set, with a 10 GB download.
+[`reproduce/README.md`](reproduce/README.md) gives the expected results, the other 13 datasets, the retraining of the
+forests and the checks.
 
 ## Repository layout
 
 | path | contents |
 |---|---|
-| `src/` | the library and the `haricot` CLI: signal, e-mers, overlaps, fuzzy de Bruijn graph, layout |
-| `pipeline/` | the programs `haricot assemble` runs, `haricot-ovl-filter` (used by the checks), the truth programs |
-| `datasets/` | data download and set reconstruction |
+| `src/` | the library and the `haricot` CLI: signal, e-mers, overlaps, fuzzy de Bruijn graph, layout; `src/pipeline/`: the code the programs share |
+| `src/bin/` | the programs `haricot assemble` runs, `haricot-ovl-filter` (used by the checks), the truth programs |
+| `reproduce/` | the manuscript's results from the public data, one script per step (`reproduce/README.md`) |
+| `datasets/` | data download and set reconstruction (`datasets/README.md`) |
 | `truth/` | signal-exact truth of a read set (training labels, evaluation) |
 | `training/` | forest training |
-| `evaluation/` | the other assemblers, scoring, tables, the Bandage figure |
+| `evaluation/` | the other assemblers, scoring, tables, the Bandage figure (`evaluation/README.md`) |
 | `checks/` | read-order and read-name invariance; byte identity of two runs |
 | `envs/` | conda environments |
-| `tests/` | Rust tests; `tests/eval/`: tests of the evaluation scripts |
-| `docs/` | `REPRODUCE.md`; the overview figure |
+| `tests/` | Rust tests; `tests/eval/`: tests of the evaluation scripts (`tests/README.md`) |
+| `docs/` | the overview figure |
 | `vendor/arrow-ipc` | the Arrow IPC reader with a patch for delta dictionaries (`vendor/README.md`) |
 
 ## Testing
 
 ```bash
-cargo test --release --locked                  # Rust: library, CLI and pipeline programs
+cargo test --release --locked                  # Rust: library, CLI and programs
 python -m unittest discover -s tests/eval      # evaluation scripts (envs/haricot.yml)
 ```
 
-The four end-to-end tests need a fixture that is not distributed and report as ignored without it
-(`tests/fixtures/README.md` says how to make it).
+The three end-to-end tests need a fixture that is not distributed and report as ignored without it
+([`tests/README.md`](tests/README.md)).
 
 ## License
 
-MIT ([`LICENSE`](LICENSE)). The raw reads stay under the licences of their sources (`datasets/sources.tsv`).
+MIT ([`LICENSE`](LICENSE)). The vendored `vendor/arrow-ipc` is Apache-2.0 ([`vendor/README.md`](vendor/README.md)).
+The raw reads stay under the licences of their sources (`datasets/sources.tsv`).
 
 ## Citation
 
 Cite the Zenodo record [10.5281/zenodo.23963126](https://doi.org/10.5281/zenodo.23963126). The manuscript reference
-will be added here.
+will be added here. Changes between versions: [`CHANGELOG.md`](CHANGELOG.md).
 
 Questions and bug reports: [GitHub issues](https://github.com/STORMgroup/HARICOT/issues).

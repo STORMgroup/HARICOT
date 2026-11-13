@@ -6,9 +6,10 @@
 <len> <seq>`, the sequence already in the contig's orientation (what wtpoa-cns builds its consensus from).
 Here each edge contributes ONE read segment, the first listed, cut to the distance to the next edge's
 offset; the last edge contributes its whole segment: one read per step cut at the layout's offset, no consensus,
-as anchor_seq.py writes our layouts (wtdbg2 lists several reads per edge, not one anchor per node, so the
+as anchor_seq.py writes HARICOT's layouts (wtdbg2 lists several reads per edge, not one anchor per node, so the
 first listed is taken; its offsets sit on wtdbg2's 1 kb grid). Scoring this and wtdbg2's consensus (asm.fa) with
-identical QUAST settings measures what QUAST charges for the missing consensus on a layout we did not build.
+identical QUAST settings measures what QUAST charges for the missing consensus on a layout HARICOT did not build
+(Supplementary Table S11). score.sh runs it.
 
 Usage: wtdbg2_lay.py asm.ctg.lay.gz OUT.fa [--min-len 1000] [--pick first|longest]
 """
@@ -44,8 +45,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("lay")
     ap.add_argument("out")
-    ap.add_argument("--min-len", type=int, default=1000)
-    ap.add_argument("--pick", choices=("first", "longest"), default="first")
+    ap.add_argument("--min-len", type=int, default=1000, help="shorter contigs are not written (QUAST's --min-contig)")
+    ap.add_argument("--pick", choices=("first", "longest"), default="first",
+                    help="the read segment each edge contributes: the first listed (default; the manuscript's "
+                         "runs) or the longest")
     a = ap.parse_args()
     n = w = tot = empty = 0
     with open(a.out, "w") as o:

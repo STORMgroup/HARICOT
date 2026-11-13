@@ -15,7 +15,7 @@
 //!   512 events (`L_x` = read x's length in retained events, the coordinate space);
 //! * a window is two adjacent bins (the last bin alone at the end); its expected count is the
 //!   pair's anchor total times the window's share of the `L_a x L_b` rectangle (exact trapezoid
-//!   cell counts, [`cells_in`]);
+//!   cell counts, `cells_in`);
 //! * the window with the largest `z = (obs - e) / sqrt(max(e, 1))` is kept (first one on ties),
 //!   and the score is `-log10` of its Poisson tail with the number of windows as multiplicity
 //!   ([`crate::overlap::dp::tail_nlp`]).
@@ -25,10 +25,8 @@
 //! identical across four regimes (p99 2.8-3.3).
 //!
 //! **Ownership and the rule.** A pair is scored once, by its owner (the LOWER read id, as
-//! [`super::find_overlap_candidates`] owns pairs), in the owner frame: anchors `(a_pos, b_pos)`,
-//! `L_a`, `L_b`. It is nominated when the score reaches EITHER read's level. With the fixed level
-//! of `--prefilter-nlp L` both reads' levels are `L`, so the rule is the owner's single test;
-//! per-read levels ([`Nominator::per_read`]) exist for a per-read null and for the tests.
+//! [`super::find_overlap_candidates_frame`] owns pairs), in the owner frame: anchors `(a_pos, b_pos)`,
+//! `L_a`, `L_b`. It is nominated when the score reaches the level `L` of `--prefilter-nlp L`.
 //!
 //! **The level** is a stated chance level, not a fitted one: `L = 2` nominates a pair whose
 //! densest diagonal window has p <= 1e-2 under the uniform null after the window multiplicity.
@@ -72,6 +70,7 @@ fn cells_in(k0: i64, k1: i64, l1: i64, l2: i64) -> f64 {
 /// The densest two-bin window (by z) of per-bin counts `cnt` of `n` anchors over the `l1 x l2`
 /// rectangle, scored as `-log10` of its Poisson tail over the number of windows. `NaN` with no
 /// anchor.
+#[cfg(test)]
 fn diag_nlp(cnt: &[u32], n: u32, l1: i64, l2: i64) -> f64 {
     diag_best(cnt, n, l1, l2).map_or(f64::NAN, |(obs, e, m)| dp::tail_nlp(obs, e, m))
 }
@@ -158,6 +157,7 @@ fn bin_transposed(anchors: &[Anchor], la: u32, lb: u32, cnt: &mut Vec<u32>) -> (
 /// `nlp2n_1` of one pair's cloud in the owner frame: `anchors` as gathered by the owner `a`
 /// (`a_pos` on `a`, `b_pos` on `b`), `la` / `lb` the two reads' lengths in retained events.
 /// `cnt` is scratch.
+#[cfg(test)]
 pub fn pair_nlp(anchors: &[Anchor], la: u32, lb: u32, cnt: &mut Vec<u32>) -> f64 {
     let (l1, l2) = bin_owner(anchors, la, lb, cnt);
     diag_nlp(cnt, anchors.len() as u32, l1, l2)
@@ -166,6 +166,7 @@ pub fn pair_nlp(anchors: &[Anchor], la: u32, lb: u32, cnt: &mut Vec<u32>) -> f64
 /// [`pair_nlp`] of the same cloud in the OTHER read's frame: every anchor's `a_pos` / `b_pos` and the
 /// two lengths exchanged, without copying the cloud. Equal to `pair_nlp` of the swapped anchors with
 /// `lb, la`, operation for operation.
+#[cfg(test)]
 pub fn pair_nlp_transposed(anchors: &[Anchor], la: u32, lb: u32, cnt: &mut Vec<u32>) -> f64 {
     let (l1, l2) = bin_transposed(anchors, la, lb, cnt);
     diag_nlp(cnt, anchors.len() as u32, l1, l2)
@@ -175,10 +176,8 @@ pub fn pair_nlp_transposed(anchors: &[Anchor], la: u32, lb: u32, cnt: &mut Vec<u
 pub struct Nominator<'a> {
     /// Read lengths in retained events, by read id.
     lens: &'a [u32],
-    /// The level every read uses, unless `per_read` is set.
+    /// The level every read uses.
     level: f64,
-    /// Per-read levels, by read id.
-    per_read: Option<&'a [f64]>,
     /// Score both frames and keep the larger (`OverlapParams::symmetric_pairs`): the pair's score
     /// is then the same whichever read owns it.
     symmetric: bool,
@@ -190,17 +189,6 @@ impl<'a> Nominator<'a> {
         Nominator {
             lens,
             level,
-            per_read: None,
-            symmetric: false,
-        }
-    }
-
-    /// One level per read: a pair is nominated when its score reaches either read's level.
-    pub fn per_read(lens: &'a [u32], levels: &'a [f64]) -> Self {
-        Nominator {
-            lens,
-            level: f64::NAN,
-            per_read: Some(levels),
             symmetric: false,
         }
     }
@@ -212,22 +200,18 @@ impl<'a> Nominator<'a> {
         self
     }
 
-    fn level_of(&self, r: u32) -> f64 {
-        self.per_read.map_or(self.level, |v| v[r as usize])
-    }
-
     /// Whether the owner `a` (the lower id) aligns its pair with `b`, given the pair's cloud
     /// as `a` gathered it. A `NaN` score (no anchor) is never nominated.
     ///
-    /// The rule is `s >= level(a) || s >= level(b)` with `s` the owner frame's score, or with
+    /// The rule is `s >= L` with `s` the owner frame's score, or with
     /// `--symmetric` the larger of the two frames' (`max` keeps the other score when one is `NaN`).
-    /// It is decided as `s1 >= L || s2 >= L` with `L = min(level(a), level(b))` (the same truth
+    /// It is decided as `s1 >= L || s2 >= L` (the same truth
     /// value, `NaN` included), the second frame only when the first does not already reach `L`,
-    /// and each frame's tail only when its upper bound does not already fall short ([`reaches`]).
+    /// and each frame's tail only when its upper bound does not already fall short (`reaches`).
     pub fn nominated(&self, a: u32, b: u32, anchors: &[Anchor]) -> bool {
         let mut cnt = Vec::new();
         let (la, lb) = (self.lens[a as usize], self.lens[b as usize]);
-        let level = self.level_of(a).min(self.level_of(b));
+        let level = self.level;
         let n = anchors.len() as u32;
         let (l1, l2) = bin_owner(anchors, la, lb, &mut cnt);
         if reaches(diag_best(&cnt, n, l1, l2), level) {
@@ -303,10 +287,9 @@ mod tests {
         assert!(pair_nlp(&[], la, lb, &mut cnt).is_nan());
     }
 
-    /// Either read's level nominates: the rule is an OR over the pair's two reads, evaluated on
-    /// the one owner-frame score.
+    /// Reaching the level nominates.
     #[test]
-    fn either_reads_level_nominates() {
+    fn the_level_nominates() {
         let lens = [8_000u32, 9_000, 7_000];
         let c: Vec<Anchor> = (0..200u32)
             .map(|i| Anchor {
@@ -316,24 +299,14 @@ mod tests {
             .collect();
         let s = pair_nlp(&c, lens[0], lens[1], &mut Vec::new());
         assert!(s.is_finite() && s > 1.0);
-        let lv = |a: f64, b: f64| [a, b, f64::INFINITY];
-        for (levels, want) in [
-            (lv(s - 1.0, s + 1.0), true),
-            (lv(s + 1.0, s - 1.0), true),
-            (lv(s, s + 1.0), true), // reaching a level counts
-            (lv(s + 1.0, s + 1.0), false),
-        ] {
-            let n = Nominator::per_read(&lens, &levels);
-            assert_eq!(n.nominated(0, 1, &c), want, "levels {levels:?}");
-        }
         assert!(Nominator::fixed(&lens, s).nominated(0, 1, &c));
         assert!(!Nominator::fixed(&lens, s + 1e-9).nominated(0, 1, &c));
         assert!(!Nominator::fixed(&lens, 0.0).nominated(0, 1, &[]));
     }
 
     /// The nomination (second frame only when the first falls short, each tail only past its upper
-    /// bound) is the stated rule on the two frames' full scores, `max(s1, s2) >= min(level_a,
-    /// level_b)` (owner frame only without `symmetric`), over chance clouds, weak and strong
+    /// bound) is the stated rule on the two frames' full scores, `max(s1, s2) >= level`
+    /// (owner frame only without `symmetric`), over chance clouds, weak and strong
     /// diagonals, empty clouds, both frame modes and levels around the scores themselves.
     #[test]
     fn nomination_is_the_rule_on_the_full_scores() {
@@ -385,12 +358,6 @@ mod tests {
                     );
                     if got { yes += 1 } else { no += 1 }
                 }
-                let per = [level, level + 1.0];
-                let want = s1.max(s2) >= level;
-                let got = Nominator::per_read(&lens, &per)
-                    .symmetric(true)
-                    .nominated(0, 1, &c);
-                assert_eq!(got, want, "trial {trial} per-read levels {per:?}");
             }
         }
         assert!(yes > 2_000 && no > 2_000, "{yes} nominated, {no} not");

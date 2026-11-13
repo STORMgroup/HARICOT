@@ -1,13 +1,40 @@
 //! `haricot assemble`: the full assembler, reads to layout, as run for the manuscript.
 //!
-//! Each step is one pipeline program (`pipeline/`, built next to `haricot` in `target/release`), run as a child
+//! Each step is one pipeline program (`src/bin/`, built next to `haricot` in `target/release`), run as a child
 //! process with its arguments fixed here; the programs' defaults are the manuscript configuration. Per step, one row
 //! of `OUT/time.tsv` (wall s, max RSS KB, user s, sys s, exit) and a log in `OUT/work/`.
 //!
-//! Steps: candidate detection (`haricot-detect --production`) -> stage-1 features (`haricot-pair-features`) and
-//! forest (`haricot-forest`) -> stage-2 graph features (`haricot-graph-features`) and forest -> keep cut, graph,
-//! layout, end bridges (`haricot-layout layout`) -> contig-end rescue (`haricot-rescue`, then features and the
-//! rescue forest on its pool) -> the rescue's admission and the final build (`haricot-layout final`).
+//! The steps, as named in `time.tsv` and the README:
+//!
+//! | step | program | what it does |
+//! |---|---|---|
+//! | `detect` | `haricot-detect --production` | candidate overlaps (W/ovl.bin) |
+//! | `pair_features` | `haricot-pair-features` | stage-1 features; the seed-occurrence table (W/occ.bin) |
+//! | `stage1` | `haricot-forest --stage 1` | stage-1 scores and drop lists (W/m/stage1__*) |
+//! | `graph_features` | `haricot-graph-features` | stage-2 features of the stage-1-accepted set |
+//! | `stage2` | `haricot-forest --stage 2` | stage-2 scores and drop lists (W/m/stage2__*) |
+//! | `layout` | `haricot-layout layout` | depth-adaptive keep cut, graph, layout, end bridges |
+//! | `rescue` | `haricot-rescue rescue` | the contig-end rescue's pool (W/q9c) |
+//! | `rescue_features` | `haricot-pair-features --only` | the pool's features (only for a non-empty pool) |
+//! | `rescue_forest` | `haricot-forest --tag rescue` | the pool's scores, the accepted pairs (W/acc.tsv) |
+//! | `final` | `haricot-layout final` | the rescue's admission and the final build into OUT |
+//!
+//! W is OUT/work. Without `--keep-work` the candidate caches, feature tables and intermediate
+//! builds are deleted at the end; the scores, drop lists and the rescue's tables stay. The work
+//! files' names are part of the recorded outputs and of the checks (`checks/`), so they stay as
+//! they are; what each holds:
+//!
+//! | name in W | contents |
+//! |---|---|
+//! | `ovl.bin`, `occ.bin` | the candidate cache; the seed-occurrence table |
+//! | `feat/`, `s2/`, `feat9/` | stage-1 features, stage-2 (graph) features, the rescue pool's features |
+//! | `m/`, `s9/` | scores and drop lists of the stage-1 and stage-2 forests; of the rescue forest |
+//! | `depth.txt` | the depth estimate that picks the stage-2 keep level |
+//! | `pol7/`, `thr.tsv` | the build of the kept overlaps; its read placements |
+//! | `q16_mbbc.drop.tsv` | the drop list without the end bridges |
+//! | `eb/`, `thr_eb.tsv` | the build with the end bridges; its read placements |
+//! | `q9c/` | the contig-end rescue: its pool (`pool.tsv`, `pool_detail.tsv`, `pool_ovl.bin`) |
+//! | `acc.tsv`, `admit.tsv` | the pool pairs the rescue forest accepts; those admitted |
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
@@ -18,6 +45,10 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, bail, ensure};
 use sha2::{Digest, Sha256};
+
+// The stage-2 keep rule (`haricot-layout --keep-level`): the depth of the overlaps stage 2 keeps at
+// 0.995 picks the keep level.
+use crate::pipeline::keep_cut::KEEP_RULE;
 
 /// The forests of the manuscript runs, as published: file name -> SHA-256.
 const PUBLISHED_FORESTS: &[(&str, &str)] = &[
@@ -117,23 +148,24 @@ const PROGRAMS: [&str; 6] = [
     "haricot-rescue",
 ];
 
-/// The stage-2 keep cut: `policy7` (the depth of the stage-2 keep-0.995 set picks the level; `haricot-layout
-/// --keep-level`).
-const KEEP_RULE: &str = "policy7";
-
 /// The models directory a build uses when `--models` is not given: `models/` in the source tree it was built from.
 pub const DEFAULT_MODELS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/models");
 
 /// What `haricot assemble` takes from the command line.
 #[derive(Debug)]
 pub struct Options {
+    /// The input reads (`.pod5`); the file name without `.pod5` is the dataset key.
     pub reads: PathBuf,
+    /// The output directory.
     pub out: PathBuf,
+    /// The forests' directory (`stage1.*`, `stage2.*`, `rescue.*`).
     pub models: PathBuf,
+    /// Threads per step (`RAYON_NUM_THREADS`); `None`: all available cores.
     pub threads: Option<usize>,
+    /// Keep the intermediate files in OUT/work.
     pub keep_work: bool,
+    /// Replace OUT if it holds an earlier run.
     pub force: bool,
-    pub bin_dir: Option<PathBuf>,
 }
 
 /// Where a step's stdout or stderr goes.
@@ -145,6 +177,7 @@ enum Sink {
     Inherit,
 }
 
+/// Runs the steps: the programs' directory, the work directory, OUT/time.tsv, the threads.
 struct Runner {
     bin: PathBuf,
     work: PathBuf,
@@ -217,6 +250,7 @@ impl Runner {
     }
 }
 
+/// A finished step's resource use, as `wait4` reports it.
 struct Usage {
     max_rss_kb: i64,
     user_s: f64,
@@ -263,6 +297,7 @@ fn wait_usage(pid: u32) -> Result<Usage> {
     })
 }
 
+/// The SHA-256 of a file, in lowercase hex.
 fn sha256_file(p: &Path) -> Result<String> {
     let mut f = File::open(p).with_context(|| format!("reading {}", p.display()))?;
     let mut h = Sha256::new();
@@ -380,6 +415,7 @@ fn git(args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&o.stdout).trim().to_string())
 }
 
+/// This host's name, for the first line `haricot assemble` prints.
 fn hostname() -> String {
     let mut buf = [0u8; 256];
     // SAFETY: buf is writable for its length.
@@ -404,6 +440,7 @@ fn log_lines(p: &Path, pats: &[&str], max: usize) -> Vec<String> {
     v[v.len().saturating_sub(max)..].to_vec()
 }
 
+/// A step's arguments, as owned OS strings.
 fn os(parts: &[&dyn AsRef<OsStr>]) -> Vec<OsString> {
     parts.iter().map(|p| p.as_ref().to_os_string()).collect()
 }
@@ -429,6 +466,9 @@ fn prepare_out(out: &Path, force: bool) -> Result<()> {
     Ok(())
 }
 
+/// Run the whole pipeline on `o.reads` into `o.out`: check the programs and the forests, print the
+/// provenance line, run the steps, delete the intermediates (unless `o.keep_work`), print the
+/// totals.
 pub fn run(o: &Options) -> Result<()> {
     ensure!(o.reads.is_file(), "no reads file {}", o.reads.display());
     let name = o
@@ -438,13 +478,10 @@ pub fn run(o: &Options) -> Result<()> {
         .to_string_lossy()
         .into_owned();
     let key = name.strip_suffix(".pod5").unwrap_or(&name).to_string();
-    let bin = match &o.bin_dir {
-        Some(b) => b.clone(),
-        None => std::env::current_exe()?
-            .parent()
-            .context("executable directory")?
-            .to_path_buf(),
-    };
+    let bin = std::env::current_exe()?
+        .parent()
+        .context("executable directory")?
+        .to_path_buf();
     for p in PROGRAMS {
         ensure!(
             bin.join(p).is_file(),
@@ -518,7 +555,7 @@ pub fn run(o: &Options) -> Result<()> {
     let s1_scores = w.join(format!("m/stage1__{key}.scores.tsv"));
     let both = |n| (Sink::Log(n), Sink::Log(n));
 
-    // 1. candidates: Hough detection, the partner pre-filter, the relative repeat-mask cap (--production)
+    // detect: Hough detection, the partner pre-filter, the relative repeat-mask cap (--production)
     let (a, b) = both("detect.log");
     r.step(
         "detect",
@@ -544,8 +581,8 @@ pub fn run(o: &Options) -> Result<()> {
     }
     fs::remove_dir_all(w.join("p2f")).ok();
 
-    // 2. stage-1 features (and the seed-occurrence table the rescue reads), stage-1 forest, stage-2 graph features,
-    //    stage-2 forest
+    // pair_features (and the seed-occurrence table the rescue reads), stage1, graph_features,
+    // stage2
     let (a, b) = both("pair_features.log");
     r.step(
         "pair_features",
@@ -614,7 +651,7 @@ pub fn run(o: &Options) -> Result<()> {
             &key,
             &"--features-dir",
             &w.join("feat"),
-            &"--s2-dir",
+            &"--graph-features-dir",
             &w.join("s2"),
             &"--out-dir",
             &w.join("m"),
@@ -623,7 +660,7 @@ pub fn run(o: &Options) -> Result<()> {
         Sink::Inherit,
     )?;
 
-    // 3. the keep cut, its build, the end bridges and their build
+    // layout: the keep cut, its build, the end bridges and their build
     let mut args = os(&[
         &"layout",
         &ovl,
@@ -631,7 +668,7 @@ pub fn run(o: &Options) -> Result<()> {
         &w,
         &"--key",
         &key,
-        &"--s2-drop",
+        &"--stage2-drop",
         &w.join(format!("m/stage2__{key}__keep")),
         &"--scores",
         &s1_scores,
@@ -647,7 +684,7 @@ pub fn run(o: &Options) -> Result<()> {
         Sink::Log("layout.log"),
     )?;
 
-    // 4. contig-end rescue: end-read pairs the detection never proposed; the rescue forest over its pool
+    // rescue: end-read pairs the detection never proposed; then rescue_features, rescue_forest
     let (a, b) = both("rescue.log");
     r.step(
         "rescue",
@@ -720,7 +757,7 @@ pub fn run(o: &Options) -> Result<()> {
         )?;
     }
 
-    // 5. the rescue's admission and the final build into OUT
+    // final: the rescue's admission and the final build into OUT
     let mut args = os(&[&"final", &ovl, &"--work", &w, &"--out", &o.out]);
     args.extend(os(keep));
     r.step(

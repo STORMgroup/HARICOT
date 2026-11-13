@@ -1,0 +1,15 @@
+id	key	species	reference	main_contig	genome_size	sample_rate	quast	paternal	source
+D1	cj	Campylobacter jejuni	cj.fa	CP149499.1	1768448	5000	default	-	hall2024_cj
+D2	lm	Listeria monocytogenes	lm.fa	CP149495.1	2944530	5000	default	-	hall2024_lm
+D3	vp1	Vibrio parahaemolyticus	vp.fa	CP149505.1	3281443	5000	default	-	hall2024_vp
+D4	vp2	Vibrio parahaemolyticus	vp.fa	CP149506.1	1865648	5000	default	-	hall2024_vp
+D5	se	Salmonella enterica	se.fa	CP149507.1	4752118	5000	default	-	hall2024_se
+D6	sd	Streptococcus dysgalactiae	sd.fa	CP149485.1	2204985	5000	default	-	hall2024_sd
+D7	at2	Arabidopsis thaliana	athal.fa	NC_003071.7	19698289	5000	large	-	ena_athal
+D8	at3	Arabidopsis thaliana	athal.fa	NC_003074.8	23459830	5000	large	-	ena_athal
+D9	at5	Arabidopsis thaliana	athal.fa	NC_003076.8	26975502	5000	large	-	ena_athal
+D10	dm2L	Drosophila melanogaster	dmel.fa	NT_033779.5	23513712	4000	large	-	ont_dmel
+D11	dm2R	Drosophila melanogaster	dmel.fa	NT_033778.4	25286936	4000	large	-	ont_dmel
+D12	dm3L	Drosophila melanogaster	dmel.fa	NT_037436.4	28110227	4000	large	-	ont_dmel
+D13	dmX	Drosophila melanogaster	dmel.fa	NC_004354.4	23542271	4000	large	-	ont_dmel
+D14	hg18	Homo sapiens (HG002)	hg002v1.2_matY.fa	chr18_MATERNAL	78908763	5000	large	chr18_PAT.fa	ont_hg002

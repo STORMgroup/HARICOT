@@ -1,4 +1,6 @@
-"""Readers shared by the evaluation harness (evaluation only; nothing here feeds the assembler).
+"""Readers of the truth's files and of HARICOT's layout, for evaluation (nothing here feeds the assembler).
+evaluation/anchor_seq.py uses read_evbase, read_paths and read_fastq; read_spans and contig_table are for other
+analyses of the truth and no script of the manuscript's runs calls them.
 
 Formats (all little-endian):
   evref.bin (truth/event_ref.py), per read:
@@ -8,9 +10,9 @@ Formats (all little-endian):
       (reference-free); status 0 UNPLACED 1 CONF 2 SINGLE 3 LOWQ 4 CONFLICT
   evbase.bin (a base map without placements), per read:
       u32 name_len, name, u32 n, n x i32 base
-  spans.bin (haricot-truth-events), per read:
+  spans.bin (haricot-truth-events; truth/truth.sh's OUT/spans.bin), per read:
       u32 name_len, name, u32 n_samples, u32 n, n x u32 start, n x u32 end
-  unitig_paths.tsv (haricot-detect --dump-paths): contig, step, anchor_read, ev_beg, ev_end, dir,
+  unitig_paths.tsv (haricot assemble's layout): contig, step, anchor_read, ev_beg, ev_end, dir,
       advance_events, coord_events
 """
 import gzip
@@ -76,7 +78,8 @@ def read_evbase(path, want=None):
 
 
 def read_spans(path):
-    """name -> (n_samples, start u32 array, end u32 array)."""
+    """name -> (n_samples, start u32 array, end u32 array), from a spans.bin (the raw-signal span of every retained
+    event)."""
     buf = open(path, "rb").read()
     off, out = 0, {}
     while off < len(buf):
@@ -125,7 +128,9 @@ def read_fastq(path, want):
 
 
 def contig_table(fai, coord_gap=10_000_000):
-    """[(name, global start, length)] in .fai / contigs.tsv order (event_ref.py's axis)."""
+    """[(name, global start, length)] of the reference contigs, from a .fai or truth/truth.sh's contigs.tsv (name and
+    length in the first two columns), in file order: the global axis of evref.bin when coord_gap is event_ref.py's
+    --gap (default 10 Mb)."""
     out, cur = [], 0
     for line in open(fai):
         nm, ln = line.split("\t")[:2]

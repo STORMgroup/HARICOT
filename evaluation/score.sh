@@ -12,6 +12,7 @@
 #              ours_seq.fa   HARICOT's sequence: each layout step's anchor read over the step (anchor_seq.py; no consensus)
 #              wtd_lay.fa    wtdbg2's layout without its consensus (wtdbg2_lay.py; a control)
 #              quast_<label>/report.tsv   per assembly: ours_seq, flye, wtdbg2, wtd_lay, rawsamble (+ wtdbg2_L0)
+#              quast_<label>_pat/report.tsv   the same against PAT.fa, with --paternal
 #              components.tsv  tool, level, graph, segments, components (components.py)
 # Tools on PATH: quast (5.3.0, its minimap2 2.30), seqkit; Python with numpy.
 set -uo pipefail

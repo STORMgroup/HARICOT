@@ -8,7 +8,6 @@
 use std::io::{self, Write};
 
 use crate::graph::FuzzyGraph;
-use crate::layout::stringgraph::StringGraph;
 
 /// Segment-name prefix so node ids are valid GFA identifiers.
 const SEG_PREFIX: &str = "n";
@@ -99,51 +98,12 @@ pub fn write_gfa<W: Write>(graph: &FuzzyGraph, out: &mut W) -> io::Result<()> {
 }
 
 /// Convenience: render the graph to a `String`.
+#[cfg(test)]
 pub fn to_gfa_string(graph: &FuzzyGraph) -> String {
     let mut buf = Vec::new();
     // Writing to a Vec<u8> is infallible.
     write_gfa(graph, &mut buf).expect("writing GFA to an in-memory buffer cannot fail");
     String::from_utf8(buf).expect("GFA output is valid UTF-8")
-}
-
-/// Write an OLC read [`StringGraph`] as GFA v1: one segment per read (length in
-/// events), one link per reduced dovetail edge, plus containment attachments.
-pub fn write_string_graph_gfa<W: Write>(
-    graph: &StringGraph,
-    names: &[String],
-    len_events: &[u32],
-    out: &mut W,
-) -> io::Result<()> {
-    write_header(out)?;
-    for (rid, name) in names.iter().enumerate() {
-        write_segment(out, name, len_events[rid], None)?;
-    }
-    for e in &graph.edges {
-        write_link(
-            out,
-            &names[e.from as usize],
-            e.from_dir.sign(),
-            &names[e.to as usize],
-            e.to_dir.sign(),
-            e.overlap_events,
-            None,
-            None,
-        )?;
-    }
-    // Containment attachments: container(+) -> child(+), overlap = child length.
-    for &(container, child) in &graph.contain_edges {
-        write_link(
-            out,
-            &names[container as usize],
-            '+',
-            &names[child as usize],
-            '+',
-            len_events[child as usize],
-            None,
-            None,
-        )?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]

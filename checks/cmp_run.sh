@@ -1,10 +1,10 @@
 #!/bin/bash
-# cmp_run.sh REF NEW [NREADS]: every file of a recorded haricot assemble run REF against the run NEW, byte for byte (cmp), and the
-# files NEW has that REF lacks. Skipped: logs (*.log, *.stdout), the step timings (time.tsv), scorer outputs a recorded
-# run may hold (metrics.tsv, pieces.tsv) and the canonical dumps of checks/invariance.sh (work/canon/, sym_compare.py).
+# cmp_run.sh REF NEW [NREADS]: every file of a haricot assemble run REF against the run NEW, byte for byte (cmp), and
+# the files NEW has that REF lacks. Skipped: logs (*.log, *.stdout), the step timings (time.tsv), scorer outputs a run
+# directory may hold (metrics.tsv, pieces.tsv) and the canonical dumps of checks/invariance.sh (work/canon/).
 # With NREADS (the run's read count), a candidate cache (*.bin) of NEW that is REF's bytes followed by a bincode Vec<u64>
-# of NREADS content hashes (8-byte length + 8 bytes per read: pipeline/src/cache.rs) counts
-# as "same + hashes" instead of differing.
+# of NREADS content hashes (8-byte length + 8 bytes per read: src/pipeline/cache.rs) counts as "same + hashes" instead
+# of differing.
 # Prints each differing / missing / added file and one summary line; exit 0 iff at least one file was compared and
 # nothing differs or is missing; exit 2 on a usage error.
 usage() { sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }

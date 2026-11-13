@@ -5,7 +5,7 @@
 //! `calculate_mean_of_filtered_segment`, `gen_events`). RawHash2 uses this
 //! algorithm for R10.4.1, so the logic mirrors the C closely.
 //!
-//! Input is the **normalized** signal (see [`crate::signal::normalize`]); the
+//! Input is the **normalized** signal (see [`crate::signal::normalize()`]); the
 //! output is one mean current value per detected event ("segment").
 //!
 //! Two deliberate robustness deviations from the C:
@@ -258,7 +258,7 @@ mod tests {
     use super::*;
     use crate::params::Params;
 
-    /// The slice form of `comp_tstat` is the indexed loop it replaced, bit for bit.
+    /// The slice form of `comp_tstat` equals the plain indexed loop, bit for bit.
     #[test]
     fn comp_tstat_matches_the_indexed_loop() {
         fn reference(prefix: &[f64], prefix_sq: &[f64], n: usize, w_len: usize) -> Vec<f32> {

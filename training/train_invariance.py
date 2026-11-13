@@ -13,7 +13,9 @@ scores) agrees pair for pair, as text, with the as-written run's (names mapped b
 tags every TAG.rf<seed>.rfb and TAG.rfmeta is byte-identical and TAG.thresholds.json agrees but for the list's hash;
 and train_stage1.forest_proba equals sklearn's single-threaded predict_proba exactly on the test table. Exit 0 = PASS.
 
---det is train.sh's WORK/det (KEY.ovl.bin per set).
+--feat and --det are train.sh's WORK/feat (KEY.tsv) and WORK/det (KEY.ovl.bin); --bin holds haricot-graph-features;
+--exclude-reads is WORK/excluded_reads.txt. reproduce/README.md (Checks) gives the command on the training sets.
+
 Usage: train_invariance.py --feat DIR --det DIR --bin DIR --exclude-reads FILE --train K1,K2 --test K --out DIR
                            [--seeds 0,1] [--trees 60] [--cap 3000]
 """
@@ -75,9 +77,9 @@ def one(label, feat, s2src, excl, a, out):
     if s2src is None:  # the caches: haricot-graph-features on this run's stage-1 scores
         for k in a.train.split(","):
             run([f"{a.bin}/haricot-graph-features", f"{a.det}/{k}.ovl.bin", f"{md}/inv__{k}.oob.tsv", "--t1", repr(t1),
-                 "--out", f"{s2}/{k}.s2.tsv", "--symmetric"], log)
+                 "--out", f"{s2}/{k}.s2.tsv"], log)
         run([f"{a.bin}/haricot-graph-features", f"{a.det}/{a.test}.ovl.bin", f"{md}/inv__{a.test}.scores.tsv", "--t1",
-             repr(t1), "--out", f"{s2}/{a.test}.s2.tsv", "--symmetric"], log)
+             repr(t1), "--out", f"{s2}/{a.test}.s2.tsv"], log)
     else:
         for i, k in enumerate(a.train.split(",") + [a.test]):
             rename_table(f"{s2src}/{k}.s2.tsv", f"{s2}/{k}.s2.tsv", 100 + i)
@@ -129,7 +131,7 @@ def sklearn_check(md, feat, test):
 
 
 def main():
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     for x in ("--feat", "--det", "--bin", "--exclude-reads", "--train", "--test", "--out"):
         ap.add_argument(x, required=True)
     ap.add_argument("--seeds", default="0,1")

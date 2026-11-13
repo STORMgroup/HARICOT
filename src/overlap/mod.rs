@@ -1,29 +1,23 @@
-//! Read-to-read overlap detection (the wtdbg2 KBM analog).
+//! Read-to-read overlap detection (the wtdbg2 KBM analog; Algorithm S2, candidate detection).
 //!
 //! Stages:
 //!   1. [`SeedIndex`] — invert seeds by hash, repeat-masked (implemented in [`kbm`]).
-//!   2. [`find_overlap_candidates`] — for every read, gather its shared-seed anchors
+//!   2. [`find_overlap_candidates_frame`] — for every read, gather its shared-seed anchors
 //!      against every higher-id read, grouped per pair.
-//!   3. [`align_pair`] — per pair, [`dp::hough_aln`] (as `haricot assemble` runs it) or the
-//!      faithful wtdbg2 banded bin-DP [`dp::bin_dp`], then the repeat guards and the
-//!      null gate. Opt-in ([`OverlapParams::prefilter_nlp`]): a pair is first scored by
-//!      [`prefilter`] and aligned only when it is nominated.
-//!
-//! The bin-DP ([`dp`]) is a direct port of wtdbg2's `map_kbm` recurrence
-//! (`kbm.h:1638`): seed matches are floored into bin cells and a banded
-//! Smith-Waterman-shaped DP integrates the diagonal, accepting on
-//! matched/aligned (`min_sim`).
+//!   3. [`align_pair`] — per pair, the Hough overlapper [`dp::hough_aln`], then the repeat
+//!      guards and the null gate. With the pre-filter on ([`OverlapParams::prefilter_nlp`]),
+//!      a pair is first scored by [`prefilter`] and aligned only when it is nominated.
 
 pub mod dp;
 pub mod kbm;
 mod kernel;
 pub mod prefilter;
-pub mod read_model;
 
 pub use kbm::{SeedCounts, SeedHit, SeedIndex};
 pub use kernel::kernel_name;
 
 use rayon::prelude::*;
+#[cfg(test)]
 use rustc_hash::FxHashMap;
 
 use crate::emer::Seed;
@@ -39,14 +33,14 @@ pub struct Anchor {
 }
 
 /// A scored overlap between two reads, carrying the bin alignment so the FBG
-/// (`graph::build_graph`) can slice it into K-bins.
+/// (`graph::build_graph_dumping`) can slice it into K-bins.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Overlap {
     /// Lower read id.
     pub a: u32,
     /// Higher read id.
     pub b: u32,
-    /// Relative strand. Always forward: [`anchor_clouds`] pairs same-strand seed
+    /// Relative strand. Always forward: the anchor gather pairs same-strand seed
     /// hits only, so reverse-strand overlaps are not produced yet.
     pub strand: Strand,
     /// Total shared seeds (anchors) between the two reads.
@@ -61,7 +55,8 @@ pub struct Overlap {
     pub bin_events: u32,
     /// Gap bins on the path (wtdbg2 `gap`).
     pub gap: u32,
-    /// Slope the DP ran at (1.0 = baseline; ≠1 when slope-corrected).
+    /// Slope of the fitted diagonal `a_pos ≈ slope·b_pos + intercept` (events of `a` per event
+    /// of `b`).
     pub slope: f64,
     /// Query (read `a`) bin span `(lo, hi)`.
     pub a_bin_span: (u32, u32),
@@ -71,27 +66,17 @@ pub struct Overlap {
     pub path: Vec<(u32, u32)>,
     /// Diagonal significance at the accepted fit (`dp::diagonal_significance`).
     ///
-    /// Persisted so a single permissive overlap pass can be re-thresholded offline at
-    /// any operating point, instead of one expensive pass per gate -- the anchor work
-    /// is identical for every gate, only the decision differs. It is also the per-edge
-    /// evidence weight the graph stage needs: `build_graph` otherwise sees only
-    /// coverage COUNTS, so a barely-accepted overlap and an overwhelming one vote
-    /// alike.
+    /// Kept with the overlap for the later steps: it is a stage-1 feature
+    /// (`haricot-pair-features`).
     ///
-    /// `NaN` means "not measured" -- synthesized overlaps (the oracle, tests) carry it,
-    /// and every `z <` comparison is false for `NaN`, so those pass any filter.
+    /// `NaN` means "not measured": overlaps that are not the detector's (the truth programs',
+    /// the contig-end rescue's, tests) carry it, and every `z <` comparison is false for
+    /// `NaN`, so those pass any filter.
     pub z: f32,
 }
 
-impl Overlap {
-    /// Similarity = matched / aligned (wtdbg2 `min_sim`), in event units.
-    pub fn similarity(&self) -> f32 {
-        let aligned_events = (self.aligned_bins.max(1) * self.bin_events) as f32;
-        self.matched as f32 / aligned_events
-    }
-}
-
 /// Read pair `(a, b)` → the shared-seed anchors between them.
+#[cfg(test)]
 type PairClouds = FxHashMap<(u32, u32), Vec<Anchor>>;
 
 /// Anchors gathered for one read before they are grouped by partner. Above this a read
@@ -258,12 +243,8 @@ pub fn align_pair(
     if (anchors.len() as u32) < params.min_aln_bins {
         return None;
     }
-    let aln = if params.hough {
-        // Global Hough-extent overlapper (detects the diagonal itself). See `dp::hough_aln`.
-        dp::hough_aln(anchors, dp, params.hough_min_conf as f64)
-    } else {
-        dp::bin_dp(anchors, 1.0, dp)
-    };
+    // Global Hough-extent overlapper (detects the diagonal itself). See `dp::hough_aln`.
+    let aln = dp::hough_aln(anchors, dp);
     if !aln.is_overlap() {
         return None;
     }
@@ -322,8 +303,9 @@ pub fn align_pair(
 ///
 /// Returns one accepted [`Overlap`] per read pair, sorted by `(a, b)`.
 ///
-/// Without read lengths the opt-in pre-filter cannot run: see
+/// Without read lengths the pre-filter cannot run: see
 /// [`find_overlap_candidates_with`].
+#[cfg(test)]
 pub fn find_overlap_candidates(
     reads: &[&[Seed]],
     index: &SeedIndex,
@@ -334,7 +316,7 @@ pub fn find_overlap_candidates(
 }
 
 /// [`find_overlap_candidates`] with the reads' lengths in retained events (`lens[i]` for read
-/// `i`, the coordinate space; `ReadSketch::n_coord_events`), which the opt-in pre-filter
+/// `i`, the coordinate space; `ReadSketch::n_coord_events`), which the pre-filter
 /// ([`OverlapParams::prefilter_nlp`], [`prefilter`]) needs.
 ///
 /// With `prefilter_nlp = None` the lengths are unused and the result is exactly
@@ -345,6 +327,7 @@ pub fn find_overlap_candidates(
 ///
 /// # Panics
 /// When `prefilter_nlp` is set and `lens` is `None` or shorter than the read set.
+#[cfg(test)]
 pub fn find_overlap_candidates_with(
     reads: &[&[Seed]],
     index: &SeedIndex,
@@ -394,11 +377,11 @@ pub fn align_pair_canonical(
     }
 }
 
-/// [`find_overlap_candidates_with`] with the reads' tie ranks (`rank[i]`,
-/// [`crate::readorder::rank_by_content`]), which the opt-in canonical pair frame
+/// `find_overlap_candidates_with` with the reads' tie ranks (`rank[i]`,
+/// [`crate::readorder::rank_by_content`]), which the canonical pair frame
 /// ([`OverlapParams::symmetric_pairs`]) needs with the lengths: every pair is aligned by
 /// [`align_pair_canonical`] and the pre-filter scores both frames. With `symmetric_pairs` off the
-/// ranks are unused and the result is [`find_overlap_candidates_with`]'s.
+/// ranks are unused and the result is `find_overlap_candidates_with`'s.
 ///
 /// # Panics
 /// When `symmetric_pairs` is set and `lens` or `rank` is `None` or shorter than the read set.
@@ -440,10 +423,6 @@ pub fn find_overlap_candidates_frame(
     let (scored, nominated) = (AtomicU64::new(0), AtomicU64::new(0));
     let dp = BinDp::from_params(params, e);
     let n_reads = index.n_reads().min(reads.len() as u32);
-    log::debug!(
-        "overlap: {n_reads} reads, {} index entries, streamed per read",
-        index.len()
-    );
     let per_read: Vec<Vec<Overlap>> = (0..n_reads)
         .into_par_iter()
         .map_init(
@@ -466,7 +445,7 @@ pub fn find_overlap_candidates_frame(
                         .par_iter()
                         .filter_map(|&(b, s, e)| {
                             let anchors = &sc.anchors[s as usize..e as usize];
-                            // Opt-in pre-filter: the owner `a` scores the pair on this
+                            // The pre-filter: the owner `a` scores the pair on this
                             // same cloud and skips `align_pair` unless it is nominated.
                             if let Some(nom) = &nominator {
                                 if !nom.nominated(a, b, anchors) {
@@ -490,7 +469,7 @@ pub fn find_overlap_candidates_frame(
         )
         .collect();
     if let Some(level) = params.prefilter_nlp {
-        // One line on stderr, only when the opt-in pre-filter ran (the default is silent).
+        // One line on stderr, only when the pre-filter ran (the default is silent).
         let (n, m) = (scored.into_inner(), nominated.into_inner());
         eprintln!(
             "prefilter: nlp2n_1 >= {level}: {m} of {n} gathered pairs nominated ({:.2}%), the rest not aligned",
@@ -506,6 +485,7 @@ pub fn find_overlap_candidates_frame(
 
 /// The anchor clouds of every pair whose lower read id lies in `a_range`, keyed by pair
 /// — exactly what [`find_overlap_candidates`] aligns. For inspection and tests.
+#[cfg(test)]
 pub fn anchor_clouds(
     reads: &[&[Seed]],
     index: &SeedIndex,
@@ -524,6 +504,7 @@ pub fn anchor_clouds(
 }
 
 /// Build seed lists for many reads and find their overlaps in one call.
+#[cfg(test)]
 pub fn overlaps_from_seeds(reads: &[Vec<Seed>], params: &OverlapParams, e: u32) -> Vec<Overlap> {
     let slices: Vec<&[Seed]> = reads.iter().map(|v| v.as_slice()).collect();
     let index = SeedIndex::build(slices.iter().copied(), params);
@@ -547,12 +528,9 @@ mod tests {
         params.bin_events = 4;
         params.min_aln_bins = 4;
         params.min_matches = 2;
-        params.min_similarity = 0.0;
         // Disable the repeat guards for this synthetic dense overlap.
         params.max_similarity = f32::INFINITY;
         params.max_anchor_density = f32::INFINITY;
-        params.pgap = -2;
-        params.pvar = -3;
 
         // 40 collinear shared seeds (distinct hashes) → slope-1 diagonal.
         let mk = |rid: u32, base: u32| -> Vec<Seed> {
@@ -724,8 +702,6 @@ mod tests {
     fn production() -> OverlapParams {
         let mut p = crate::params::Params::r10_4_1().overlap;
         p.bin_events = 192;
-        p.hough = true;
-        p.hough_min_conf = 0.0;
         p.hough_min_z = 3.0;
         p.null_gate = true;
         p.null_z = 4.0;
@@ -924,8 +900,6 @@ mod tests {
     #[test]
     fn align_pair_does_not_depend_on_anchor_order() {
         let mut params = crate::params::Params::r10_4_1().overlap;
-        params.hough = true;
-        params.hough_min_conf = 0.0;
         params.hough_min_z = 3.0;
         params.null_gate = true;
         params.null_z = 4.0;
@@ -978,8 +952,6 @@ mod tests {
     #[test]
     fn canonical_alignment_does_not_depend_on_the_owner() {
         let mut params = crate::params::Params::r10_4_1().overlap;
-        params.hough = true;
-        params.hough_min_conf = 0.0;
         params.hough_min_z = 3.0;
         params.null_gate = true;
         params.null_z = 4.0;

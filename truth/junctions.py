@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
-"""Adjacencies of the SAMPLE's genome that the reference does not have, from split reads.
+"""Adjacencies of the sample's genome that the reference does not have, from split reads.
 
 A read whose consecutive alignment segments land far apart (or on opposite strands) spans
 a junction. Supported by one read it is a chimera; supported by several independent reads
-it is the sample's own structure relative to the reference -- an inversion, a
-translocation, the origin of a circular chromosome -- and an assembly that follows it is
-RIGHT. Example: E. coli ATCC 25922 reads against NZ_CP009072.1 span a ~1.6 Mb inversion
-(535 kb <-> 2,145 kb) with ~41 reads in all four orientations; chimeric junctions have 1 read.
+it is the sample's own structure relative to the reference (an inversion, a
+translocation, the origin of a circular chromosome), which a correct assembly follows.
 
 Junctions are clustered at --res bp on both sides (orientation-free), and those with at
-least --min-support reads are written as `pos_a pos_b support` in GLOBAL coordinates
-(event_ref.py's axis).
+least --min-support reads are written as `pos_a pos_b support` in global coordinates
+(event_ref.py's axis). truth/truth.sh runs it on its event_ref.py output.
 
 Usage: junctions.py SEGS.tsv --out junctions.tsv [--min-support 3] [--res 20000] [--near 50000]
 """
@@ -19,11 +17,11 @@ import collections
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("segs")
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("segs", help="event_ref.py's PREFIX.segs.tsv")
     ap.add_argument("--out", required=True)
-    ap.add_argument("--min-support", type=int, default=3)
-    ap.add_argument("--res", type=int, default=20000)
+    ap.add_argument("--min-support", type=int, default=3, help="reads a junction needs to be written")
+    ap.add_argument("--res", type=int, default=20000, help="clustering resolution, bp")
     ap.add_argument("--near", type=int, default=50000,
                     help="consecutive segments closer than this, same strand, are not a junction")
     a = ap.parse_args()

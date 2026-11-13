@@ -1,6 +1,6 @@
 # datasets/: the manuscript's read sets from public data
 
-The manuscript used 30 training sets and 56 final-test sets. Each set is a list of read ids. These scripts download
+The manuscript used 30 training sets (T1-T5) and 56 test sets (D1-D14). Each set is a list of read ids. These scripts download
 the public raw signal (POD5, or fast5 converted to POD5), write each set's POD5 in its saved read order and check
 every read. A second script fetches the reference genomes and checks every sequence.
 

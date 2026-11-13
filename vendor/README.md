@@ -3,7 +3,9 @@
 ## arrow-ipc 53.4.1 (Apache-2.0, https://github.com/apache/arrow-rs)
 
 `arrow-ipc/` is the crates.io release 53.4.1 of the Apache Arrow IPC crate, wired in through
-`[patch.crates-io]` in `../Cargo.toml` (the version `pod5lib` pulls in). Two changes:
+`[patch.crates-io]` in `../Cargo.toml` (the version `pod5lib` pulls in). It stays under the Apache License 2.0:
+`arrow-ipc/LICENSE.txt` and `arrow-ipc/NOTICE.txt` are arrow-rs's files at tag 53.4.1. Two changes, each marked
+`HARICOT` in the source:
 
 - `src/reader.rs::read_dictionary_impl`: reads delta dictionary batches (below);
 - `src/lib.rs`: `#![allow(mismatched_lifetime_syntaxes)]`, a lint added to Rust after this release.

@@ -1,4 +1,4 @@
-# Truth, training, scoring and checks, at the versions of the manuscript runs.
+# Data download, truth, training, scoring, checks and Rawsamble's miniasm, at the versions of the manuscript runs.
 #   conda env create -f envs/haricot.yml && conda activate haricot
 # (haricot assemble itself needs no Python.)
 name: haricot

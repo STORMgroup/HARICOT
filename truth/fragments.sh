@@ -1,5 +1,5 @@
 #!/bin/bash
-# Exact-cut fragments of a read set and their truth, plus depth subsets of the fragments: the training pool's 4 kb sets.
+# Exact-cut fragments of a read set and their truth, plus depth subsets of the fragments: the 4 kb training sets.
 #
 #   truth/fragments.sh READS.pod5 TRUTH OUT --base-depth X [--length 4000] [--depths 12,6] [--bin-dir DIR] [--python PY]
 #

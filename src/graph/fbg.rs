@@ -1,4 +1,4 @@
-//! Fuzzy Bruijn Graph (FBG) data model.
+//! Fuzzy de Bruijn graph (FBG) data model.
 //!
 //! Adapted from wtdbg2 (`extern/wtdbg2/wtdbg.h`, `wtdbg-graph.h`). Unlike a
 //! classical de Bruijn graph of fixed-length k-mers, a node here is a
@@ -34,7 +34,7 @@ pub struct Node {
     /// Number of reads supporting this node.
     pub cov: u32,
     /// Support as the relative edge gate (`clean::filter_weak_edges`) reads it: `cov as
-    /// f32` as built; `threading::unzip` gives each copy of a split node its share.
+    /// f32` as built.
     pub support: f32,
     /// Nominal length of the segment, in events.
     pub len_events: u32,
@@ -61,15 +61,12 @@ pub struct Edge {
     pub offset: i32,
 }
 
-/// The fuzzy Bruijn graph.
+/// The fuzzy de Bruijn graph.
 #[derive(Debug, Default, Clone)]
 pub struct FuzzyGraph {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
-    /// Read-threaded node triples; empty unless `GraphParams::read_threading` is on.
-    /// See [`crate::graph::threading`].
-    transitions: crate::graph::threading::Transitions,
-    /// Where each read sits in the graph; recorded under the same flag.
+    /// Where each read sits in the graph. See [`crate::graph::threading`].
     read_threads: crate::graph::threading::ReadThreads,
 }
 
@@ -91,17 +88,7 @@ impl FuzzyGraph {
         id
     }
 
-    /// Read-threaded node triples (empty when threading was not recorded).
-    pub fn transitions(&self) -> &crate::graph::threading::Transitions {
-        &self.transitions
-    }
-
-    /// Install the read-threaded triples.
-    pub fn set_transitions(&mut self, tr: crate::graph::threading::Transitions) {
-        self.transitions = tr;
-    }
-
-    /// Where each read was threaded (empty when threading was not recorded).
+    /// Where each read was threaded (empty when no placement was recorded).
     pub fn read_threads(&self) -> &crate::graph::threading::ReadThreads {
         &self.read_threads
     }

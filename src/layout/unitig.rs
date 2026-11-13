@@ -25,7 +25,6 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::graph::FuzzyGraph;
 use crate::graph::ends::{End, EndAdj, entry_end, exit_end, from_end, to_end};
 use crate::graph::fbg::Dir;
-use crate::graph::threading;
 
 /// A maximal non-branching path through the graph.
 #[derive(Debug, Clone, Default)]
@@ -58,23 +57,7 @@ pub struct UnitigLink {
 /// each incident unitig — duplicating it counts a degree-`d` junction `d` times and
 /// inflates the reported lengths.
 pub fn gen_unitigs(graph: &FuzzyGraph) -> Vec<Unitig> {
-    gen_unitigs_threaded(graph, 1)
-}
-
-/// [`gen_unitigs`], with the read-corroboration floor for threaded repeat traversal
-/// (`GraphParams::thread_min_reads`). `1` reproduces `gen_unitigs` exactly.
-pub fn gen_unitigs_threaded(graph: &FuzzyGraph, thread_min_reads: u32) -> Vec<Unitig> {
     let ends = EndAdj::new(graph);
-    // Read-threaded repeat traversal. Empty unless `GraphParams::read_threading` was on,
-    // in which case this whole mechanism is inert and the walk is exactly as before.
-    //
-    // KNOWN LIMITATION: a repeat node threaded by k disjoint paths can still only belong
-    // to ONE unitig, so k-1 of them break there anyway. Resolving that properly means
-    // UNZIPPING the node into k copies at build time; this extends whichever path
-    // reaches it first (deterministic — nodes are scanned in id order — but arbitrary).
-    // It is still strictly better than stopping all k, which is what happens without it.
-    let tr = graph.transitions();
-    let tadj = threading::ThreadAdj::new(graph);
     let len_of = |n: u32| graph.nodes()[n as usize].len_events as i64;
     let offset_of = |ei: usize| graph.edges()[ei].offset as i64;
     let next = |n: u32, d: Dir| ends.next(n, d);
@@ -102,38 +85,13 @@ pub fn gen_unitigs_threaded(graph: &FuzzyGraph, thread_min_reads: u32) -> Vec<Un
         visited.insert(start.0);
         let mut span = len_of(start.0);
         let mut cur = start;
-        let mut prev_node: Option<u32> = None;
-        loop {
-            let step = match next(cur.0, cur.1) {
-                Some(s) => Some(s),
-                // The chain hit a branch. A branch is a locus several places in the
-                // genome map onto, and which continuation is right is a property of the
-                // READS passing through, not of the node or of either edge. If exactly
-                // one continuation is read-threaded — and no other entry claims it —
-                // carry on through instead of stopping. Inert unless threading was
-                // recorded, so the default layout is unchanged.
-                None if !tr.is_empty() => prev_node
-                    // (a) leave a branching node by the read-threaded continuation
-                    .and_then(|p| threading::threaded_step(&tadj, tr, p, cur.0, thread_min_reads))
-                    // (b) or ENTER a junction, but only when we can already see that
-                    // its exit will be threaded. Without that look-ahead the walk
-                    // could claim a repeat node it then cannot leave, blocking a path
-                    // that could have gone through.
-                    .or_else(|| {
-                        let (m, _dm, _ei) = ends.step_out(cur.0, cur.1)?;
-                        threading::threaded_step(&tadj, tr, cur.0, m, thread_min_reads).map(|_| m)
-                    })
-                    .and_then(|w| tadj.edge(cur.0, w).map(|ei| (w, Dir::Fwd, ei))),
-                None => None,
-            };
-            let Some((m, dm, ei)) = step else { break };
+        while let Some((m, dm, ei)) = next(cur.0, cur.1) {
             if visited.contains(&m) {
-                break; // closed a cycle, or a repeat another path already claimed
+                break; // closed a cycle, or reached a node another unitig holds
             }
             visited.insert(m);
             span += offset_of(ei) + len_of(m);
             nodes.push((m, dm));
-            prev_node = Some(cur.0);
             cur = (m, dm);
         }
         unitigs.push(Unitig {
@@ -228,11 +186,12 @@ pub struct Contig {
 /// locus chains into one long contig, while lower-coverage side branches (including
 /// the phase-shifted double-tiling artefacts left behind by transitive reduction /
 /// bubble popping) fall out as short separate contigs.
+#[cfg(test)]
 pub fn gen_contigs(graph: &FuzzyGraph) -> Vec<Contig> {
     gen_contigs_from(graph, &gen_unitigs(graph))
 }
 
-/// [`gen_contigs`] over a unitig set the caller already has.
+/// `gen_contigs` over a unitig set the caller already has.
 ///
 /// A `Contig` stores unitig INDICES, so it is only meaningful against the exact slice it
 /// was built from. Recomputing the unitigs inside here would give indices into a different
@@ -354,97 +313,6 @@ pub fn gen_contigs_from(graph: &FuzzyGraph, unitigs: &[Unitig]) -> Vec<Contig> {
         });
     }
     contigs
-}
-
-#[cfg(test)]
-mod threading_tests {
-    use super::*;
-    use crate::graph::fbg::Edge;
-    use crate::graph::threading::Transitions;
-
-    fn e(from: u32, to: u32) -> Edge {
-        Edge {
-            from,
-            from_dir: Dir::Fwd,
-            to,
-            to_dir: Dir::Fwd,
-            cov: 2,
-            support: 2.0,
-            offset: 0,
-        }
-    }
-
-    /// REGRESSION: a `Contig` stores unitig INDICES, so `gen_contigs` must never
-    /// recompute a different unitig set than the caller holds. Threaded traversal makes
-    /// the two partitions differ, and an index into the wrong one runs out of bounds.
-    #[test]
-    fn contigs_index_into_the_unitigs_they_were_built_from() {
-        let mut g = FuzzyGraph::new();
-        for _ in 0..5 {
-            g.add_node(4, 80);
-        }
-        for (a, b) in [(0, 2), (1, 2), (2, 3), (2, 4)] {
-            g.add_edge(e(a, b));
-        }
-        let mut tr = Transitions::default();
-        tr.insert((0, 2, 3), 1);
-        tr.insert((1, 2, 4), 1);
-        g.set_transitions(tr);
-        let unitigs = gen_unitigs_threaded(&g, 1);
-        let contigs = gen_contigs_from(&g, &unitigs);
-        for c in &contigs {
-            for &ui in &c.unitigs {
-                assert!(
-                    ui < unitigs.len(),
-                    "contig indexes unitig {ui} of {}",
-                    unitigs.len()
-                );
-            }
-        }
-        // And the unthreaded pair must still agree with each other.
-        let plain = gen_unitigs(&g);
-        for c in gen_contigs(&g) {
-            for ui in c.unitigs {
-                assert!(ui < plain.len());
-            }
-        }
-    }
-
-    /// A repeat node entered and left two ways. Without threading BOTH chains stop at
-    /// the repeat, so the layout is four short unitigs. With reads threading the node,
-    /// one chain carries straight through — which is the entire point: a longer CORRECT
-    /// contig, not a longer one.
-    #[test]
-    fn threading_carries_a_unitig_through_a_repeat() {
-        let mut g = FuzzyGraph::new();
-        for _ in 0..5 {
-            g.add_node(4, 80);
-        }
-        for (a, b) in [(0, 2), (1, 2), (2, 3), (2, 4)] {
-            g.add_edge(e(a, b));
-        }
-        let plain = gen_unitigs(&g);
-        let longest_plain = plain.iter().map(|u| u.nodes.len()).max().unwrap();
-        assert_eq!(longest_plain, 1, "every chain stops at the branch");
-
-        let mut tr = Transitions::default();
-        tr.insert((0, 2, 3), 1);
-        tr.insert((1, 2, 4), 1);
-        g.set_transitions(tr);
-        let threaded = gen_unitigs(&g);
-        let longest = threaded.iter().map(|u| u.nodes.len()).max().unwrap();
-        assert!(
-            longest >= 3,
-            "one path should run 0 -> 2 -> 3 (or 1 -> 2 -> 4), got {longest}"
-        );
-        // The repeat belongs to exactly one unitig; the other path still breaks. That is
-        // the documented limitation — unzipping is what would fix it.
-        let uses_2: usize = threaded
-            .iter()
-            .filter(|u| u.nodes.iter().any(|&(n, _)| n == 2))
-            .count();
-        assert_eq!(uses_2, 1, "node 2 is claimed once");
-    }
 }
 
 #[cfg(test)]

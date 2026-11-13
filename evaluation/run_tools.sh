@@ -1,5 +1,5 @@
 #!/bin/bash
-# The comparators on one read set, as in the manuscript: Flye and wtdbg2 on the reads' basecalls, Rawsamble on the raw
+# The other assemblers on one read set, as in the manuscript: Flye and wtdbg2 on the reads' basecalls, Rawsamble on the raw
 # signal. Each step is timed (OUT/<tool>.time.tsv: step, wall s, max RSS KB, user s, sys s, exit; GNU time).
 #
 #   evaluation/run_tools.sh READS.pod5 CALLS.fq.gz OUT --genome-size BP [--threads 16] [--tools flye,wtdbg2,rawsamble]
@@ -15,7 +15,8 @@
 # Outputs: OUT/flye (Flye's output, asm.fa = assembly.fasta), OUT/wtdbg2 (asm.ctg.lay.gz, asm.ctg.dot.gz, asm.fa =
 #   wtpoa-cns's consensus), OUT/rawsamble (ovl.paf.gz, asm.gfa, asm.fa, miniasm_protocol.txt: PLAIN = miniasm on the
 #   overlaps as written; DEVIATION = only on overlaps filtered by filter_ovl.awk, the cap given; FAIL = no assembly).
-# Tools on PATH: flye, wtdbg2, wtpoa-cns, miniasm, gfatools, seqkit; Python with pod5.
+# Tools on PATH: flye, wtdbg2, wtpoa-cns, miniasm, gfatools, seqkit, GNU awk; Python with pod5; GNU time at
+# /usr/bin/time.
 set -uo pipefail
 usage() { sed -n '5,6p' "$0" | sed 's/^# *//'; exit 2; }
 HERE=$(cd "$(dirname "$0")" && pwd)

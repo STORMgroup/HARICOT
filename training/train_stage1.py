@@ -16,8 +16,9 @@ Operating points are FROZEN on the training sets: the score threshold that keeps
 share (--keep) of the training sets' true candidates (out-of-bag scores, so the threshold is not
 set on training fit). Each test dataset is then filtered at that same threshold.
 
-Writes, per test dataset and operating point, a drop list (`name_a name_b`, for
-`haricot-ovl-filter --drop-pairs`), and prints overlap-level recall/precision and AUC.
+Writes the thresholds, features and seeds (TAG.thresholds.json), the out-of-bag scores of each training set
+(TAG__KEY.oob.tsv, which stage 2 reads), and per test set its scores (TAG__KEY.scores.tsv) and, per operating point,
+the pairs below the threshold (TAG__KEY__keepK.drop.tsv: name_a name_b); prints recall, precision and AUC.
 
 Training is a function of the rows' values, not of read names or row order: the per-set
 cap draws rows by a hash of the set key and the row's canonical-frame values (`sub_u`, no read name), and the training
@@ -201,16 +202,17 @@ def fit_forests(X, y, seeds, score_sets, save=None, **kw):
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--train", required=True)
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--train", required=True, help="comma list of training sets (KEY: FEATURES_DIR/KEY.tsv)")
     ap.add_argument("--test", default="", help="comma list of sets to score with the trained forests (printed)")
     ap.add_argument("--tag", required=True)
     ap.add_argument("--keep", default="0.995,0.99,0.98,0.95")
     ap.add_argument("--features-dir", required=True)
     ap.add_argument("--out-dir", required=True)
-    ap.add_argument("--drop-features", default="")
+    ap.add_argument("--drop-features", default="", help="comma list of FEATURES to leave out (the rescue forest)")
     ap.add_argument("--extra-features", default="",
-                    help="comma list of feature columns beyond FEATURES (absent columns read as NaN)")
+                    help="comma list of feature columns beyond FEATURES (absent columns read as NaN); the "
+                         "manuscript's training does not use it")
     ap.add_argument("--trees", type=int, default=400)
     ap.add_argument("--leaf", type=int, default=20)
     ap.add_argument("--seed", type=int, default=0, help="forest random_state")
@@ -223,7 +225,8 @@ def main():
                     help="train on a deterministic share F of the labelled rows (sub_u); the other "
                          "labelled rows are scored like the unknown ones, out of sample, so every "
                          "training row still gets an out-of-sample score; thresholds from the sampled "
-                         "rows' out-of-bag scores. 1 (default): every labelled row, as before")
+                         "rows' out-of-bag scores. 1 (default): every labelled row. Exclusive with "
+                         "--cap-per-set; the manuscript's training does not use it")
     ap.add_argument("--cap-per-set", type=int, default=0,
                     help="train on at most N labelled rows per training set, class-stratified (cap_mask); "
                          "the other labelled rows are scored like the unknown ones, out of sample, as with "

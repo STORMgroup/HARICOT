@@ -7,7 +7,6 @@ __pycache__/
 
 # Local data, forests and upstream sources (downloaded; not in git)
 /data
-/data/
 /models/
 /read_lists/
 /downloads/

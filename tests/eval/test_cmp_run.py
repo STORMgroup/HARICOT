@@ -1,4 +1,4 @@
-"""checks/cmp_run.sh REF NEW [NREADS]: byte identity of a recorded run, what it skips (logs, timings, scorer
+"""checks/cmp_run.sh REF NEW [NREADS]: byte identity of two runs, what it skips (logs, timings, scorer
 outputs, the invariance check's canonical dumps), the content-hash appendix of a candidate cache, missing and added files,
 usage errors."""
 import os

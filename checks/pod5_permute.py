@@ -4,12 +4,13 @@
 The pipeline numbers reads in pod5 iteration order (`pipeline::sketch_pod5_streaming`), so the order of
 the written file is the order every step sees.
 
-  --order identity   SRC's own order (writes only the order list unless --write is given)
-  --order reverse    the reverse of SRC's order: every pair's lower-id read becomes the higher one
+  --order identity   SRC's own order (with --dst, a copy of SRC rewritten by the pod5 writer)
+  --order reverse    the reverse of SRC's order: every pair's lower-numbered read becomes the higher one
   --order shuffle    a seeded uniform shuffle (Python's random.Random(SEED).shuffle)
 
 Always writes ORDER (one read id per line, in the new order). With a DST, writes the new pod5 and then
-re-reads it to check that its read ids are exactly ORDER, in order (exit 1 otherwise).
+re-reads it to check that its read ids are exactly ORDER, in order (exit 1 otherwise). invariance.sh runs it with
+reverse and shuffle.
 
 Usage: pod5_permute.py SRC --order identity|reverse|shuffle [--seed N] --order-out ORDER [--dst DST]
 """
@@ -22,7 +23,7 @@ import pod5
 
 
 def main():
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("src")
     ap.add_argument("--order", required=True, choices=["identity", "reverse", "shuffle"])
     ap.add_argument("--seed", type=int, default=None)

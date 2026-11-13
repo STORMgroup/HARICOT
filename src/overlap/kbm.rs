@@ -3,11 +3,11 @@
 //! wtdbg2 indexes k-mers into 256 bp bins and finds read-to-read matches by
 //! looking up shared k-mers (`extern/wtdbg2/kbm.{c,h}`). Here we index e-mer
 //! seeds by hash and find reads that share many seeds. This is the core of the
-//! costly all-vs-all comparison that the de-Bruijn-style approach aims to
+//! costly all-vs-all comparison that the de Bruijn graph approach aims to
 //! avoid doing exhaustively.
 //!
 //! Scope: this module is only the inverted seed index (with repeat masking) and
-//! shared-seed lookup. The banded alignment over the resulting anchors lives in
+//! shared-seed lookup. The Hough overlapper over the resulting anchors lives in
 //! [`crate::overlap::dp`].
 
 use rayon::prelude::*;
@@ -17,15 +17,17 @@ use crate::emer::Seed;
 use crate::emer::sketch::{STRAND_BIT, pack_read_strand, strand_of};
 use crate::params::{OverlapParams, Strand};
 
-/// One occurrence of a seed on a read, in 8 bytes (it was 12): the position, and the read id
-/// with the strand in its top bit (as [`Seed`]).
+/// One occurrence of a seed on a read, in 8 bytes: the position, and the read id with the
+/// strand in its top bit (as [`Seed`]).
 #[derive(Debug, Clone, Copy)]
 pub struct SeedHit {
+    /// The seed's position on the read, in retained events.
     pub pos: u32,
     id: u32,
 }
 
 impl SeedHit {
+    /// A hit of read `read_id` at `pos` on `strand`.
     pub fn new(read_id: u32, pos: u32, strand: Strand) -> SeedHit {
         SeedHit {
             pos,
@@ -49,7 +51,7 @@ impl SeedHit {
 /// **Entry invariant: each entry's hits are sorted by `read_id` (ties by `pos`).**
 /// Every read's occurrences of a hash therefore form one contiguous run, and the hits
 /// on reads with a higher id than a given read are a suffix found by one binary search
-/// — which is how [`crate::overlap::find_overlap_candidates`] gives each pair to its
+/// — which is how [`crate::overlap::find_overlap_candidates_frame`] gives each pair to its
 /// lower read.
 #[derive(Debug, Default)]
 pub struct SeedIndex {
@@ -71,7 +73,7 @@ fn shard_of(hash: u64) -> usize {
     ((hash ^ (hash >> 32) ^ (hash >> 16)) as usize) & (SHARDS - 1)
 }
 
-/// How often each hash occurs over many seed lists, counted in parallel [`SHARDS`] (counts do not
+/// How often each hash occurs over many seed lists, counted in parallel `SHARDS` (counts do not
 /// depend on the order hashes are counted in, so this is the serial count).
 #[derive(Debug, Default)]
 pub struct SeedCounts {
@@ -262,10 +264,12 @@ impl SeedIndex {
     }
 
     /// Number of distinct (non-masked) seed hashes indexed.
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.shards.iter().map(|m| m.len()).sum()
     }
 
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.shards.iter().all(|m| m.is_empty())
     }
@@ -284,6 +288,7 @@ impl SeedIndex {
     }
 
     /// Iterate over all indexed `(hash, hits)` entries.
+    #[cfg(test)]
     pub fn entries(&self) -> impl Iterator<Item = (&u64, &Vec<SeedHit>)> {
         self.shards.iter().flat_map(|m| m.iter())
     }

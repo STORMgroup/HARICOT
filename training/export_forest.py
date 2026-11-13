@@ -57,10 +57,10 @@ def export(rf, path):
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--model-dir", required=True)
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--model-dir", required=True, help="train_stage1.py / train_stage2.py --out-dir")
     ap.add_argument("--tag", required=True)
-    ap.add_argument("--out-dir", default="")
+    ap.add_argument("--out-dir", default="", help="default: --model-dir")
     a = ap.parse_args()
     out = a.out_dir or a.model_dir
     os.makedirs(out, exist_ok=True)

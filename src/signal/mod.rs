@@ -12,10 +12,7 @@ pub mod io;
 pub mod normalize;
 
 pub use events::detect_events;
-pub use io::{
-    AdcRead, RawRead, for_each_adc_chunk, for_each_raw_chunk, for_each_raw_read, read_fast5,
-    read_pod5, read_pod5_limit, read_signals, read_signals_limit,
-};
+pub use io::{AdcRead, RawRead, for_each_adc_chunk, for_each_raw_chunk, for_each_raw_read};
 pub use normalize::normalize;
 
 use crate::params::Params;
@@ -39,12 +36,7 @@ pub fn signal_to_events(signal_pa: &[f32], params: &Params) -> Vec<f32> {
         None => signal_pa.to_vec(),
     };
     let norm = normalize::normalize(&filtered);
-    let evts = events::detect_events(&norm, &params.segmentation);
-    if params.signal.event_merge > 0.0 {
-        merge_events(&evts, params.signal.event_merge)
-    } else {
-        evts
-    }
+    events::detect_events(&norm, &params.segmentation)
 }
 
 /// [`signal_to_events`] with each event's span expressed in **raw signal samples**, i.e.
@@ -57,13 +49,8 @@ pub fn signal_to_events(signal_pa: &[f32], params: &Params) -> Vec<f32> {
 /// `end` is one past the event's last kept sample; dropped samples inside an event are
 /// spanned, not counted.
 ///
-/// Means are identical to [`signal_to_events`]'s. `event_merge > 0` averages events into
-/// runs and is not supported here.
+/// Means are identical to [`signal_to_events`]'s.
 pub fn signal_to_event_spans(signal_pa: &[f32], params: &Params) -> Vec<events::EventSpan> {
-    assert!(
-        params.signal.event_merge <= 0.0,
-        "signal_to_event_spans does not track event_merge runs"
-    );
     let (filtered, band_kept): (Vec<f32>, Vec<u32>) = match params.signal.pa_filter {
         Some((lo, hi)) => signal_pa
             .iter()
@@ -85,32 +72,6 @@ pub fn signal_to_event_spans(signal_pa: &[f32], params: &Params) -> Vec<events::
         .collect()
 }
 
-/// Rawsamble/RawHash2-style pre-quantization event merge: collapse consecutive events
-/// whose z-normalized means stay within `threshold` (z-units) of the running mean into
-/// a single (averaged) event. `threshold <= 0` is a no-op. See
-/// [`SignalParams::event_merge`](crate::params::SignalParams::event_merge).
-pub fn merge_events(events: &[f32], threshold: f32) -> Vec<f32> {
-    if threshold <= 0.0 || events.is_empty() {
-        return events.to_vec();
-    }
-    let mut out = Vec::with_capacity(events.len());
-    let mut sum = events[0] as f64;
-    let mut cnt = 1u32;
-    for &v in &events[1..] {
-        let mean = sum / cnt as f64;
-        if (v as f64 - mean).abs() <= threshold as f64 {
-            sum += v as f64;
-            cnt += 1;
-        } else {
-            out.push((sum / cnt as f64) as f32);
-            sum = v as f64;
-            cnt = 1;
-        }
-    }
-    out.push((sum / cnt as f64) as f32);
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,15 +81,6 @@ mod tests {
         let sig = [10.0, 30.0, 100.0, 200.0, 250.0];
         let out = pa_bandpass(&sig, 30.0, 200.0);
         assert_eq!(out, vec![30.0, 100.0, 200.0]);
-    }
-
-    #[test]
-    fn merge_collapses_similar_runs() {
-        // 0.0,0.1,0.2 stay within 0.3 of the running mean → one event; 2.0 breaks it.
-        let m = merge_events(&[0.0, 0.1, 0.2, 2.0, 2.1], 0.3);
-        assert_eq!(m.len(), 2, "expected two runs, got {m:?}");
-        assert!((m[0] - 0.1).abs() < 1e-5, "mean of 0,0.1,0.2 = {}", m[0]);
-        assert!((m[1] - 2.05).abs() < 1e-5, "mean of 2.0,2.1 = {}", m[1]);
     }
 
     #[test]
@@ -158,10 +110,5 @@ mod tests {
             assert!((30.0..=200.0).contains(&sig[e.start as usize]));
             assert!((30.0..=200.0).contains(&sig[e.end as usize - 1]));
         }
-    }
-
-    #[test]
-    fn merge_off_is_identity() {
-        assert_eq!(merge_events(&[0.0, 1.0, 2.0], 0.0), vec![0.0, 1.0, 2.0]);
     }
 }

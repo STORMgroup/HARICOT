@@ -1,28 +1,9 @@
-//! Banded bin-DP — a faithful port of wtdbg2's KBM alignment.
+//! The Hough overlapper ([`hough_aln`]) and the significance of a pair's diagonal.
 //!
-//! This is the **clean wtdbg2 baseline**: the recurrence, penalties, band, and
-//! acceptance gate are ported directly from `extern/wtdbg2/kbm.h`, with no
-//! raw-signal adaptation baked in. wtdbg2 finds seed matches at base-pair
-//! resolution, floors each match's endpoints to a 256 bp **bin** to address a DP
-//! cell `(⌊q/256⌋, ⌊t/256⌋)`, and runs a Smith-Waterman-shaped DP over the bin
-//! grid. The cell score is `kmat + kcnt` (matched length + seed count); a banded
-//! DP integrates the weak per-cell signal into a diagonal.
-//!
-//! Mapping into the e-mer domain (the only domain change — *not* an algorithm
-//! change): the bin is `bin_events` events instead of 256 bp; an anchor is a
-//! shared e-mer match `(a_event, b_event)`; a cell's `kcnt` is the number of
-//! matches in it and `kmat` is their matched **event** length (`min(kcnt·e,
-//! bin_events)`, each e-mer covering `e` events, saturated at the bin).
-//!
-//! The DP assumes a slope-1 main diagonal exactly as wtdbg2: the `max_bvar` band
-//! and `max_bgap` gap bound budget *cumulative drift*, not a different slope. `bin_dp`
-//! takes the slope as an argument and rescales the target coordinate by it before
-//! binning; `1.0` is the pure wtdbg2 baseline. Off-slope diagonals are what the
-//! Hough overlapper [`hough_aln`] finds (`haricot assemble` runs it).
-//!
-//! Citations: recurrence `_dp_cal_spare_row_kbm` (`kbm.h:1638`), backtrace +
-//! acceptance gate `_backtrace_map_kbm` (`kbm.h:1765`, gate `kbm.h:1836`),
-//! floor-to-bin (`kbm.h:2098`).
+//! The bin grid is wtdbg2's KBM one (`extern/wtdbg2/kbm.h`): wtdbg2 floors each seed match's
+//! endpoints to a 256 bp **bin** (`kbm.h:2098`); here the bin is `bin_events` events, an anchor is a
+//! shared e-mer match `(a_event, b_event)`, and a cell's matched **event** length is
+//! `min(count·e, bin_events)` (`kbm.h:1638`). The acceptance floors are wtdbg2's (`kbm.h:1836`).
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -33,7 +14,7 @@ use super::Anchor;
 use super::kernel::{self, densest_sorted};
 use crate::params::{BeamCfg, OverlapParams};
 
-/// Bin-DP configuration, in **bins** (and the e-mer width `e`). Faithful wtdbg2
+/// The overlapper's configuration, in **bins** (and the e-mer width `e`). wtdbg2's
 /// defaults live in [`OverlapParams`]; [`from_params`](BinDp::from_params) builds
 /// this from them.
 #[derive(Debug, Clone, Copy)]
@@ -43,121 +24,56 @@ pub struct BinDp {
     pub bin_events: f64,
     /// Events per e-mer — used for the matched-event length `kmat`.
     pub e: u32,
-    /// Per-gap-bin score `pgap` (wtdbg2 −7).
-    pub pgap: i64,
-    /// Per-bin diagonal-deviation penalty `pvar` (wtdbg2 −21).
-    pub pvar: i64,
-    /// Max consecutive gap bins on the diagonal `max_bgap` (wtdbg2 4).
-    pub max_bgap: i64,
-    /// DP band half-width `max_bvar` (wtdbg2 4).
-    pub max_bvar: i64,
     /// Minimum aligned bins `min_aln` (wtdbg2 8 = 2048/256).
     pub min_aln_bins: i64,
     /// Minimum matched length `min_mat` (wtdbg2 200 bp; here in events).
     pub min_mat: i64,
-    /// Minimum matched/aligned ratio `min_sim` (wtdbg2 0.05).
-    pub min_sim: f64,
     /// Max gap-bin fraction of the alignment `max_gap` (wtdbg2 0.6).
     pub max_gap: f64,
-    /// Max span-length variation `aln_var` (wtdbg2 0.25).
-    pub aln_var: f64,
-    /// The Hough slope search (see [`BeamCfg`]); the bin-DP path ignores it.
+    /// The Hough slope search (see [`BeamCfg`]).
     pub slope_beam: BeamCfg,
     /// Significance floor `z` at the Hough early exit, from
     /// [`crate::params::OverlapParams::hough_min_z`]. `0` = off.
     pub min_z: f64,
-    /// Compute the Hough confidence exactly even for pairs that provably fail the
-    /// `min_conf` gate.
-    ///
-    /// `conf = peak / median(background)` with the median floored at 1, so
-    /// `conf <= peak`. A pair whose winning in-window peak is already below `min_conf`
-    /// is therefore rejected whatever the background says, and the 17-slope background
-    /// scan — which exists only to compute that median — is dead work. `hough_aln`
-    /// skips it for those pairs and reports `conf = peak`, an upper bound.
-    ///
-    /// With the gate OFF (`min_conf <= 0`, the permissive `z`-primary gate) no pair can
-    /// fail it, so the background is skipped for EVERY pair, accepted ones included, and
-    /// each reports `conf = peak`. On E. coli 6x that scan ran for all 586,986 pairs and
-    /// decided none of them.
-    ///
-    /// This is invisible to the pipeline: `conf` gates and is never stored on an
-    /// [`crate::overlap::Overlap`]. It *is* visible to any caller that reads or gates on
-    /// the returned `conf` itself — set this there to keep its numbers exact.
-    pub exact_conf: bool,
 }
 
 impl BinDp {
     /// Build from the overlap params + the e-mer width.
-    ///
-    /// The penalties are kept at wtdbg2's literal `pgap=−7`/`pvar=−21` rather than
-    /// scaled to `bin_events`: relaxing them to help the slope-1 baseline integrate
-    /// the weak per-e-mer-bin signal introduced cross-cluster false positives on the
-    /// `overlap_clusters` fixture, and did not recover the debug pair (a slope-1 band
-    /// cannot span its ≈1.28 diagonal, which is a geometry limit rather than a
-    /// scoring one). The lever that did recover it is the Hough overlapper's slope
-    /// search — see [`hough_aln`].
     pub fn from_params(p: &OverlapParams, e: u32) -> Self {
         BinDp {
             bin_events: p.bin_events as f64,
             e,
-            pgap: p.pgap as i64,
-            pvar: p.pvar as i64,
-            max_bgap: p.max_bgap as i64,
-            max_bvar: p.max_bvar as i64,
             min_aln_bins: p.min_aln_bins as i64,
             min_mat: p.min_matches as i64,
-            min_sim: p.min_similarity as f64,
             max_gap: p.max_gap as f64,
-            aln_var: p.aln_var as f64,
             slope_beam: p.slope_beam,
             min_z: p.hough_min_z as f64,
-            // Production skips the background scan for provably-rejected pairs; the
-            // diagnostics turn it back on. See the field docs.
-            exact_conf: false,
         }
     }
 }
 
-/// Result of the bin-DP for one read pair. Carries the bin `path` so the FBG
-/// (Phase 2) can slice the alignment into K-bins. An *empty* result
-/// (`aligned_bins == 0`, empty `path`) means no overlap passed the gate.
-/// Why a pair did **not** become an overlap: which gate ended it.
-///
-/// [`BinAln`] already carries `conf` on rejected results so a caller can tell
-/// "measured, and it failed" from "never measured". This carries the same
-/// information for the *decision*: which floor actually ended the pair. Without it
-/// a caller has to infer the reason from which fields happen to be zero, which is
+/// Why a pair did **not** become an overlap: which gate of [`hough_aln`] ended it. Without
+/// it a caller has to infer the reason from which fields happen to be zero, which is
 /// ambiguous.
-///
-/// Only [`hough_aln`] sets this; [`bin_dp`] leaves the default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Reject {
-    /// No diagonal was fitted, and no floor was reached: the default, and what
-    /// `bin_dp` always reports.
+    /// No diagonal was fitted, and no floor was reached: the default.
     #[default]
     NotMeasured,
-    /// Fewer than [`SLOPE_MIN_ANCHORS`] anchors in the cloud, so no line could be fitted.
+    /// Fewer than `SLOPE_MIN_ANCHORS` anchors in the cloud, so no line could be fitted.
     TooFewAnchors,
-    /// `conf < min_conf` — the Hough significance gate.
-    Conf,
     /// `z < hough_min_z` — the Hough *significance* gate (see
     /// [`crate::params::OverlapParams::hough_min_z`]).
     Signif,
-    /// The level-0 peak fell under the first filter ([`BeamCfg::screen_peak`] or
-    /// [`BeamCfg::screen_z`]).
-    Screen,
-    /// Fewer than [`SLOPE_MIN_ANCHORS`] anchors landed within `±tol` of the fitted line.
+    /// Fewer than `SLOPE_MIN_ANCHORS` anchors landed within `±tol` of the fitted line.
     OnLine,
     /// `aligned_bins < min_aln_bins` — wtdbg2's extent floor (`kbm.h` `min_aln`).
     Extent,
     /// `matched < min_mat` — wtdbg2's matched-length floor.
     Matched,
     /// `gap > max_gap · aligned_bins` — wtdbg2's gap-fraction floor (`kbm.h:1836`).
-    ///
-    /// Only [`hough_aln`] reports it: [`bin_dp`] ANDs the same condition into its own
-    /// acceptance and has no separate reason for it.
     Gappy,
-    /// The detector accepted it. Guards downstream in `align_clouds`
+    /// The detector accepted it. Guards downstream in `align_pair`
     /// (`max_similarity`, `max_anchor_density`, the null gate) may still reject.
     Accepted,
 }
@@ -168,9 +84,7 @@ impl Reject {
         match self {
             Reject::NotMeasured => "not_measured",
             Reject::TooFewAnchors => "few_anchors",
-            Reject::Conf => "conf",
             Reject::Signif => "hough_z",
-            Reject::Screen => "screen",
             Reject::OnLine => "online",
             Reject::Extent => "extent",
             Reject::Matched => "matched",
@@ -179,6 +93,10 @@ impl Reject {
         }
     }
 }
+
+/// Result of the overlapper for one read pair. Carries the bin `path` so the FBG
+/// can slice the alignment into K-bins. An *empty* result
+/// (`aligned_bins == 0`, empty `path`) means no overlap passed the gate.
 
 #[derive(Debug, Clone, Default)]
 pub struct BinAln {
@@ -192,17 +110,10 @@ pub struct BinAln {
     pub gap: u32,
     /// `matched / (aligned_bins · bin_events)` (wtdbg2 `min_sim` numerator/denominator).
     pub similarity: f32,
-    /// The slope the DP ran at (1.0 for the baseline).
+    /// The fitted slope.
     pub slope: f64,
-    /// Offset of the fitted diagonal, `a_pos − slope·b_pos` ([`hough_aln`] only;
-    /// 0.0 from [`bin_dp`], which is handed its slope and never fits a line).
+    /// Offset of the fitted diagonal, `a_pos − slope·b_pos`.
     pub intercept: f64,
-    /// Hough confidence (winning peak ÷ median peak over the scanned slopes) that
-    /// [`hough_aln`] gated on. **Carried on rejected results too**, so a caller can
-    /// tell "measured, and it failed" from "never measured" — a defaulted 0.0 is
-    /// indistinguishable from a genuine zero. 0.0 from [`bin_dp`], which computes no
-    /// confidence.
-    pub conf: f64,
     /// Query (read A) bin span `(lo, hi)`.
     pub a_bin_span: (u32, u32),
     /// Target (read B) bin span `(lo, hi)` in **real** (un-rescaled) bin coords.
@@ -214,7 +125,7 @@ pub struct BinAln {
     /// on it. See [`Reject`].
     pub reason: Reject,
     /// The null terms at the fitted slope, when [`hough_aln`] already computed them for
-    /// its `min_z` floor. `None` otherwise (and always from [`bin_dp`]).
+    /// its `min_z` floor. `None` otherwise.
     pub null: Option<NullParts>,
 }
 
@@ -225,240 +136,13 @@ impl BinAln {
     }
 }
 
-/// One DP cell's running state (wtdbg2 `kbm_cell_t`).
-#[derive(Debug, Clone, Copy)]
-struct Cell {
-    score: i64,
-    mat: i64,
-    cnt: i64,
-    gap: i64,
-    var: i64,
-    live: bool,
-}
-
-const DEAD: Cell = Cell {
-    score: 0,
-    mat: 0,
-    cnt: 0,
-    gap: 0,
-    var: 0,
-    live: false,
-};
-
-/// Run the banded bin-DP over a read pair's anchors and return the best
-/// alignment that passes wtdbg2's acceptance gate (or an empty [`BinAln`]).
-///
-/// `slope` rescales the target coordinate (1.0 = the wtdbg2 baseline, which is what
-/// the pipeline passes).
-pub fn bin_dp(anchors: &[Anchor], slope: f64, dp: &BinDp) -> BinAln {
-    let bin = dp.bin_events.max(1.0);
-    let bin_sz = bin as i64;
-
-    // Floor each anchor to a cell. Row coord `trow` is slope-corrected; we also
-    // remember a representative *real* b-bin per cell for the output path.
-    let mut occ: HashMap<(u32, u32), (u32, u32)> = HashMap::new(); // (qcol,trow) -> (cnt, real_b)
-    let (mut max_q, mut max_t) = (0u32, 0u32);
-    for a in anchors {
-        let qcol = (a.a_pos as f64 / bin) as u32;
-        let trow = (a.b_pos as f64 * slope / bin) as u32;
-        let real_b = (a.b_pos as f64 / bin) as u32;
-        let cell = occ.entry((qcol, trow)).or_insert((0, real_b));
-        cell.0 += 1;
-        cell.1 = cell.1.min(real_b);
-        max_q = max_q.max(qcol);
-        max_t = max_t.max(trow);
-    }
-    let empty = || BinAln {
-        slope,
-        ..Default::default()
-    };
-    if occ.is_empty() {
-        return empty();
-    }
-    let nq = max_q as usize + 1;
-    let nt = max_t as usize + 1;
-
-    // Rolling two-row DP (wtdbg2 keeps two rows; `kbm.h:1649`). `back` records
-    // the chosen move per cell for backtrace: -1 dead, 0 path-start, 1 D, 2 H, 3 V.
-    let mut prev = vec![DEAD; nq];
-    let mut cur = vec![DEAD; nq];
-    let mut back = vec![-1i8; nq * nt];
-    let mut best: (i64, usize, usize) = (i64::MIN, 0, 0);
-
-    for t in 0..nt {
-        for c in cur.iter_mut() {
-            *c = DEAD;
-        }
-        for q in 0..nq {
-            let occ_cell = occ.get(&(q as u32, t as u32)).copied();
-            let is_gap = occ_cell.is_none();
-            let (kcnt, kmat) = match occ_cell {
-                Some((cnt, _)) => {
-                    let cnt = cnt as i64;
-                    (cnt, (cnt * dp.e as i64).min(bin_sz))
-                }
-                None => (0, 0),
-            };
-            let score_cell = if is_gap { dp.pgap } else { kmat + kcnt };
-
-            let d_pred = if q > 0 { prev[q - 1] } else { DEAD };
-            let h_pred = if q > 0 { cur[q - 1] } else { DEAD };
-            let v_pred = prev[q];
-
-            // Diagonal (`bt=0`): resets var to 0, no var penalty (`kbm.h:1692`).
-            let cand_d = Cell {
-                score: d_pred.score + score_cell,
-                mat: d_pred.mat + kmat,
-                cnt: d_pred.cnt + kcnt,
-                gap: d_pred.gap,
-                var: 0,
-                live: true,
-            };
-            // Horizontal (`bt=1`, query insertion): pvar charged as |var| grows,
-            // refunded as it shrinks; var++ (`kbm.h:1678`).
-            let h_pen = if h_pred.var < 0 { -dp.pvar } else { dp.pvar };
-            let cand_h = Cell {
-                score: h_pred.score + score_cell + h_pen,
-                mat: h_pred.mat + kmat,
-                cnt: h_pred.cnt + kcnt,
-                gap: h_pred.gap,
-                var: h_pred.var + 1,
-                live: true,
-            };
-            // Vertical (`bt=2`, target insertion): symmetric; var-- (`kbm.h:1702`).
-            let v_pen = if v_pred.var > 0 { -dp.pvar } else { dp.pvar };
-            let cand_v = Cell {
-                score: v_pred.score + score_cell + v_pen,
-                mat: v_pred.mat + kmat,
-                cnt: v_pred.cnt + kcnt,
-                gap: v_pred.gap,
-                var: v_pred.var - 1,
-                live: true,
-            };
-
-            // Merge order (`kbm.h:1699`): start H; D wins ties (>=); V if strictly >.
-            let (mut chosen, mut mv, mut pred_live) = (cand_h, 2i8, h_pred.live);
-            if cand_d.score >= chosen.score {
-                chosen = cand_d;
-                mv = 1;
-                pred_live = d_pred.live;
-            }
-            if cand_v.score > chosen.score {
-                chosen = cand_v;
-                mv = 3;
-                pred_live = v_pred.live;
-            }
-            chosen.gap = if is_gap { chosen.gap + 1 } else { 0 };
-
-            // Keep iff score>0, gap band, var band (`kbm.h:1734`).
-            if chosen.score > 0 && chosen.gap <= dp.max_bgap && chosen.var.abs() <= dp.max_bvar {
-                cur[q] = chosen;
-                back[t * nq + q] = if pred_live { mv } else { 0 };
-                // A path end is a non-gap cell (`kbm.h:1738` records mat>=min_mat;
-                // we track the best-scoring end and gate after backtrace).
-                if !is_gap && chosen.score > best.0 {
-                    best = (chosen.score, q, t);
-                }
-            } else {
-                cur[q] = DEAD;
-                back[t * nq + q] = -1;
-            }
-        }
-        std::mem::swap(&mut prev, &mut cur);
-    }
-
-    if best.0 == i64::MIN {
-        return empty();
-    }
-
-    // Backtrace from the best end to its path start (`_backtrace_map_kbm`).
-    let (mut q, mut t) = (best.1, best.2);
-    let mut cells_on_path: Vec<(u32, u32, bool)> = Vec::new(); // (qcol, trow, occupied)
-    loop {
-        let occupied = occ.contains_key(&(q as u32, t as u32));
-        cells_on_path.push((q as u32, t as u32, occupied));
-        match back[t * nq + q] {
-            1 if q > 0 && t > 0 => {
-                q -= 1;
-                t -= 1;
-            }
-            2 if q > 0 => q -= 1,
-            3 if t > 0 => t -= 1,
-            _ => break, // 0 (start), -1, or would underflow
-        }
-    }
-    cells_on_path.reverse();
-
-    // Recompute matched/cnt/gap and spans along the path. `trow` (corrected) feeds
-    // the aligned-bins / length-consistency gate; `real_b` feeds the output.
-    let (mut matched, mut cnt, mut gap) = (0i64, 0i64, 0u32);
-    let (mut qlo, mut qhi, mut tlo, mut thi) = (u32::MAX, 0u32, u32::MAX, 0u32);
-    let (mut blo, mut bhi) = (u32::MAX, 0u32);
-    let mut path = Vec::new();
-    for &(qc, tr, occupied) in &cells_on_path {
-        qlo = qlo.min(qc);
-        qhi = qhi.max(qc);
-        tlo = tlo.min(tr);
-        thi = thi.max(tr);
-        if occupied {
-            let (cc, real_b) = occ[&(qc, tr)];
-            matched += (cc as i64 * dp.e as i64).min(bin_sz);
-            cnt += cc as i64;
-            blo = blo.min(real_b);
-            bhi = bhi.max(real_b);
-            path.push((qc, real_b));
-        } else {
-            gap += 1;
-        }
-    }
-    let qspan = (qhi - qlo) as i64;
-    let tspan = (thi - tlo) as i64;
-    let aligned_bins = qspan.min(tspan) + 1;
-    let aligned_events = aligned_bins as f64 * bin;
-    let similarity = matched as f64 / aligned_events.max(1.0);
-
-    // wtdbg2 acceptance gate (`kbm.h:1836`): all ANDed.
-    let accept = aligned_bins >= dp.min_aln_bins
-        && matched >= dp.min_mat
-        && matched as f64 >= aligned_events * dp.min_sim
-        && gap as f64 <= aligned_bins as f64 * dp.max_gap
-        && (qspan - tspan).abs() as f64 <= (dp.aln_var * aligned_bins as f64).max(1.0);
-    if !accept || path.is_empty() {
-        return empty();
-    }
-
-    BinAln {
-        matched: matched as u32,
-        cnt: cnt as u32,
-        aligned_bins: aligned_bins as u32,
-        gap,
-        similarity: similarity as f32,
-        slope,
-        // The banded DP is *handed* its slope and never fits a line, so it has
-        // neither an intercept nor a Hough confidence to report.
-        intercept: 0.0,
-        conf: 0.0,
-        a_bin_span: (qlo, qhi),
-        b_bin_span: (blo, bhi),
-        path,
-        // The banded DP does not fit a line, so it has no `Reject` axis to report.
-        reason: Reject::NotMeasured,
-        null: None,
-    }
-}
-
 /// Minimum anchors to attempt a slope estimate.
 const SLOPE_MIN_ANCHORS: usize = 8;
-/// A fitted overlap diagonal and its Hough confidence against the wrong-slope background.
+/// A fitted overlap diagonal.
 #[derive(Debug, Clone, Copy)]
 pub struct DiagFit {
     pub slope: f64,
     pub intercept: f64,
-    /// `peak / median(peaks)` — the [`OverlapParams::hough_min_conf`] statistic.
-    pub conf: f64,
-    /// Stopped by the first filter ([`BeamCfg::screen_peak`]) after level 0: `slope` is
-    /// the best coarse slope and `conf` its peak, and nothing was refined.
-    pub screened: bool,
 }
 
 /// Find the densest diagonal `a_pos ≈ slope·b_pos + intercept` in an anchor cloud: the
@@ -472,77 +156,27 @@ pub struct DiagFit {
 /// estimator reported slope ≈ 2 / 0.3 where the concentration scan finds ≈ 1.28; see
 /// [`hough_aln`]). `tol_events` is the diagonal half-width.
 ///
-/// Returns `None` only when there are too few anchors. `conf_floor` is the caller's
-/// `min_conf` gate, used only to skip work that cannot change the verdict (see
-/// [`BinDp::exact_conf`]); pass `0.0` for the exact confidence. The slope is clamped to
-/// `[0.2, 5.0]`.
+/// Returns `None` only when there are too few anchors. The slope is clamped to `[0.2, 5.0]`.
+#[cfg(test)]
 pub fn estimate_diagonal_fit(
     anchors: &[Anchor],
     tol_events: u32,
     beam: &BeamCfg,
-    conf_floor: f64,
 ) -> Option<DiagFit> {
     if anchors.len() < SLOPE_MIN_ANCHORS {
         return None;
     }
-    Some(fit_cloud(
-        &Cloud::new(anchors),
-        tol_events,
-        beam,
-        conf_floor,
-    ))
+    Some(fit_cloud(&Cloud::new(anchors), tol_events, beam))
 }
 
-/// [`estimate_diagonal_fit`] of a cloud of at least [`SLOPE_MIN_ANCHORS`] anchors.
-fn fit_cloud(cloud: &Cloud, tol_events: u32, beam: &BeamCfg, conf_floor: f64) -> DiagFit {
+/// [`estimate_diagonal_fit`] of a cloud of at least `SLOPE_MIN_ANCHORS` anchors.
+fn fit_cloud(cloud: &Cloud, tol_events: u32, beam: &BeamCfg) -> DiagFit {
     let anchors = cloud.anchors;
     let tol = tol_events.max(1) as f64;
-    // Locate the densest diagonal `best = (slope, peak, offset)` and score its
-    // confidence (winning peak ÷ median peak) against the wrong-slope background. The
-    // background is taken from a coarse scan over the FULL slope range, so the
-    // `min_conf` gate is not inflated by a window-only (mostly near-diagonal) median.
-    let (best, bg_peaks, screened, finalists) = beam_search_slope(cloud, tol, beam, conf_floor);
-    if screened {
-        return DiagFit {
-            slope: best.0,
-            intercept: best.2,
-            conf: best.1 as f64,
-            screened: true,
-        };
-    }
-    let conf_of = |peak: usize| match &bg_peaks {
-        Some(peaks) => peak_conf(peak, peaks.clone()),
-        // Background skipped because the peak alone already fails the gate. `conf <=
-        // peak`, so reporting the bound keeps the caller's `conf < min_conf` test giving
-        // the same answer.
-        None => peak as f64,
-    };
-    // `BeamCfg::select_z`: refit every finalist basin as the winner would be, and keep the
-    // one the gate scores highest (ties keep the finalist order, i.e. the higher count).
-    if finalists.len() > 1 {
-        let mut pick: Option<(f64, f64, f64, usize)> = None; // (z, slope, intercept, peak)
-        for f in &finalists {
-            let (slope, intercept) = refit_line(anchors, f.0, f.2, tol);
-            let z = significance_parts(cloud, slope, tol).z;
-            if pick.is_none_or(|p| z > p.0) {
-                pick = Some((z, slope, intercept, f.1));
-            }
-        }
-        let (_, slope, intercept, peak) = pick.expect("finalists is non-empty");
-        return DiagFit {
-            slope,
-            intercept,
-            conf: conf_of(peak),
-            screened: false,
-        };
-    }
+    // Locate the densest diagonal `best = (slope, peak, offset)`.
+    let best = beam_search_slope(cloud, tol, beam);
     let (slope, intercept) = refit_line(anchors, best.0, best.2, tol);
-    DiagFit {
-        slope,
-        intercept,
-        conf: conf_of(best.1),
-        screened: false,
-    }
+    DiagFit { slope, intercept }
 }
 
 /// Refine slope + intercept with a least-squares fit over only the anchors on the diagonal
@@ -570,12 +204,12 @@ fn refit_line(anchors: &[Anchor], m0: f64, c0: f64, tol: f64) -> (f64, f64) {
     }
 }
 
-/// DEVIATION from wtdbg2: a global, gap-agnostic Hough-extent overlapper, the
-/// alternative to [`bin_dp`] selected by [`OverlapParams::hough`].
+/// DEVIATION from wtdbg2: a global, gap-agnostic Hough-extent overlapper, in place of
+/// wtdbg2's banded bin-DP.
 ///
-/// Where [`bin_dp`] integrates the diagonal with a *banded* Smith-Waterman that can
+/// Where wtdbg2's bin-DP integrates the diagonal with a *banded* Smith-Waterman that can
 /// stop at the first gap budget violation, this finds the overlap diagonal with the
-/// 1-D Hough scan ([`estimate_diagonal_fit`]) and takes all anchors within `±tol`
+/// 1-D Hough scan (`fit_cloud`) and takes all anchors within `±tol`
 /// of that line as the alignment. Two consequences feed the FBG:
 ///   * it recovers the whole diagonal (no early stop at gaps) → denser, fuller bin
 ///     `path` → fewer FBG fragmentation breaks;
@@ -583,29 +217,19 @@ fn refit_line(anchors: &[Anchor], m0: f64, c0: f64, tol: f64) -> (f64, f64) {
 ///     significance, which a banded DP can still walk a thin chain through.
 ///
 /// It emits the bin `path` the FBG slicer consumes. The on-line anchors are
-/// floored to `bin_events` cells exactly as `bin_dp` floors matches; a cell's
+/// floored to `bin_events` cells as wtdbg2 floors matches; a cell's
 /// matched length is the wtdbg2 `min(count·e, bin)` (`kbm.h:1638`).
 ///
 /// `tol`, the Hough line half-width in events, is `bin_events`: detection and the FBG
-/// grid share one resolution. Accepts iff the Hough confidence ≥ `min_conf`, the null
-/// `z` ≥ `dp.min_z`, and wtdbg2's extent / matched / gap floors pass; otherwise returns
-/// an empty [`BinAln`] stamped with the [`Reject`] reason.
-pub fn hough_aln(anchors: &[Anchor], dp: &BinDp, min_conf: f64) -> BinAln {
+/// grid share one resolution. Accepts iff the null `z` ≥ `dp.min_z` and wtdbg2's extent /
+/// matched / gap floors pass; otherwise returns an empty [`BinAln`] stamped with the
+/// [`Reject`] reason.
+pub fn hough_aln(anchors: &[Anchor], dp: &BinDp) -> BinAln {
     let bin = dp.bin_events.max(1.0);
     let tol = bin;
     let empty = BinAln::default();
 
-    // 1. Hough detection + significance gate (the specificity lever). The floor lets
-    //    the search skip the confidence background where it cannot
-    //    change the verdict; with the gate OFF (`min_conf <= 0`) that is every pair,
-    //    since `conf` then decides nothing and is not stored (see `BinDp::exact_conf`).
-    let conf_floor = if dp.exact_conf {
-        0.0
-    } else if min_conf <= 0.0 {
-        f64::INFINITY
-    } else {
-        min_conf
-    };
+    // 1. Hough detection.
     if anchors.len() < SLOPE_MIN_ANCHORS {
         return BinAln {
             reason: Reject::TooFewAnchors,
@@ -613,35 +237,12 @@ pub fn hough_aln(anchors: &[Anchor], dp: &BinDp, min_conf: f64) -> BinAln {
         };
     }
     let cloud = Cloud::new(anchors);
-    let fit = fit_cloud(&cloud, tol as u32, &dp.slope_beam, conf_floor);
-    let (slope, intercept, conf) = (fit.slope, fit.intercept, fit.conf);
-    if fit.screened {
-        return BinAln {
-            slope,
-            intercept,
-            conf,
-            reason: Reject::Screen,
-            ..empty
-        };
-    }
-    if conf < min_conf {
-        // Rejected, but report WHAT was measured: the fitted diagonal and the
-        // confidence it failed on. `is_overlap()` is still false (no bins, no path),
-        // so the pipeline is unaffected — this only stops the rejected result from
-        // being indistinguishable from a defaulted one.
-        return BinAln {
-            slope,
-            intercept,
-            conf,
-            reason: Reject::Conf,
-            ..empty
-        };
-    }
+    let fit = fit_cloud(&cloud, tol as u32, &dp.slope_beam);
+    let (slope, intercept) = (fit.slope, fit.intercept);
 
-    // 1b. Significance gate, on the SAME fit and at the SAME early exit as `conf`.
-    //     `conf` is a ratio and is length-biased; `z` is a significance. On a
-    //     D. melanogaster set `conf` rejected 86.8% of true overlaps at a median `z`
-    //     of 15.8-18.8 -- see `OverlapParams::hough_min_z`.
+    // 1b. Significance gate, on the fit.
+    //     `z` is a significance: unlike a peak / background ratio it is not length-biased
+    //     (see `OverlapParams::hough_min_z`).
     //     The terms are handed back on the accepted result, so the caller's null gate
     //     (the same statistic at the same slope) does not compute them a second time.
     let mut null = None;
@@ -651,7 +252,6 @@ pub fn hough_aln(anchors: &[Anchor], dp: &BinDp, min_conf: f64) -> BinAln {
             return BinAln {
                 slope,
                 intercept,
-                conf,
                 reason: Reject::Signif,
                 ..empty
             };
@@ -680,7 +280,6 @@ pub fn hough_aln(anchors: &[Anchor], dp: &BinDp, min_conf: f64) -> BinAln {
         return BinAln {
             slope,
             intercept,
-            conf,
             reason: Reject::OnLine,
             ..empty
         };
@@ -713,18 +312,15 @@ pub fn hough_aln(anchors: &[Anchor], dp: &BinDp, min_conf: f64) -> BinAln {
     let aligned_bins = a_bins.min(b_bins);
     let gap = aligned_bins.saturating_sub(path.len() as u32);
 
-    // 4. wtdbg2's floors. `max_gap` was omitted here on the assumption that the Hough gate
-    // did that work; it does not — 52.9% of the false overlaps at `z >= 12` exceed it
-    // against 1.85% of the true. Applying wtdbg2's own value: refNG50 87,617 -> 100,161,
-    // neutral on both bacteria. `min_sim` and
-    // `aln_var` stay unapplied — they are weaker and would be new operating points.
+    // 4. wtdbg2's floors (`kbm.h:1836`): `min_aln`, `min_mat` and `max_gap`. The significance
+    // gates do not replace `max_gap`: 52.9% of the false overlaps at `z >= 12` exceed it,
+    // against 1.85% of the true. DEVIATION: `min_sim` and `aln_var` are not applied.
     let too_gappy = gap as f64 > dp.max_gap * aligned_bins.max(1) as f64;
 
     if (aligned_bins as i64) < dp.min_aln_bins || matched < dp.min_mat || too_gappy {
         return BinAln {
             slope,
             intercept,
-            conf,
             // Report WHICH floor: they fail on different pairs (a long thin diagonal
             // clears extent but not matched; a short dense one the reverse; a repeat
             // smear clears both and fails the gap).
@@ -749,7 +345,6 @@ pub fn hough_aln(anchors: &[Anchor], dp: &BinDp, min_conf: f64) -> BinAln {
         similarity,
         slope,
         intercept,
-        conf,
         a_bin_span: (alo, ahi),
         b_bin_span: (blo, bhi),
         path,
@@ -776,7 +371,7 @@ fn densest_window(sorted: &[f64], win: f64) -> (usize, f64, f64) {
     (best, lo, hi)
 }
 
-/// NOT a wtdbg2 port — a novel opt-in overlap-precision gate. The **null-hypothesis
+/// NOT a wtdbg2 port — an additional overlap gate (`OverlapParams::null_gate`). The **null-hypothesis
 /// significance** of the best diagonal in an anchor cloud, as a Poisson z-score.
 ///
 /// # The test
@@ -840,16 +435,17 @@ fn densest_window(sorted: &[f64], win: f64) -> (usize, f64, f64) {
 /// `obs ≫ E_max` and stays at `z ≫ 0`. `M_eff = 1` (a cloud tighter than one window)
 /// degrades gracefully to `E_max = E`. Deterministic (no RNG).
 ///
-/// Returns `0.0` (never significant) for fewer than [`SLOPE_MIN_ANCHORS`] anchors.
+/// Returns `0.0` (never significant) for fewer than `SLOPE_MIN_ANCHORS` anchors.
 /// This augments — never replaces — wtdbg2's `min_sim`/extent gates and the
 /// `max_similarity`/`max_anchor_density` repeat guards; it is the raw-signal analog
 /// of masking repeats by seed occurrence (`kmax`, `kbm.h`), phrased as a per-pair
 /// significance test rather than a global mask.
+#[cfg(test)]
 pub fn diagonal_significance(anchors: &[Anchor], slope: f64, tol: f64) -> f64 {
     diagonal_significance_parts(anchors, slope, tol).map_or(0.0, |p| p.z)
 }
 
-/// The individual terms behind [`diagonal_significance`]'s score.
+/// The individual terms behind `diagonal_significance`'s score.
 ///
 /// The score collapses four quantities into one number, which makes the gate
 /// impossible to calibrate after the fact: a given `z` can come from a small `obs`
@@ -871,8 +467,8 @@ pub struct NullParts {
     pub z: f64,
 }
 
-/// [`diagonal_significance`] with its intermediate terms exposed. Returns `None`
-/// for fewer than [`SLOPE_MIN_ANCHORS`] anchors (where the score is defined as 0).
+/// `diagonal_significance` with its intermediate terms exposed. Returns `None`
+/// for fewer than `SLOPE_MIN_ANCHORS` anchors (where the score is defined as 0).
 pub fn diagonal_significance_parts(anchors: &[Anchor], slope: f64, tol: f64) -> Option<NullParts> {
     if anchors.len() < SLOPE_MIN_ANCHORS {
         return None;
@@ -880,7 +476,7 @@ pub fn diagonal_significance_parts(anchors: &[Anchor], slope: f64, tol: f64) -> 
     Some(significance_parts(&Cloud::new(anchors), slope, tol))
 }
 
-/// [`diagonal_significance_parts`] of a cloud of at least [`SLOPE_MIN_ANCHORS`] anchors.
+/// [`diagonal_significance_parts`] of a cloud of at least `SLOPE_MIN_ANCHORS` anchors.
 fn significance_parts(cloud: &Cloud, slope: f64, tol: f64) -> NullParts {
     let (anchors, n) = (cloud.anchors, cloud.anchors.len());
     let tol = tol.max(1.0);
@@ -1219,22 +815,9 @@ fn expected_null_max_dense(e: f64, m_eff: f64) -> f64 {
     }
 }
 
-/// Hough confidence: the winning `peak` over the median peak across the scanned
-/// slopes. A real diagonal towers over the wrong-slope background; noise does not.
-fn peak_conf(peak: usize, mut peaks: Vec<usize>) -> f64 {
-    peaks.sort_unstable();
-    let median = peaks[peaks.len() / 2].max(1) as f64;
-    peak as f64 / median
-}
-
-/// Full slope range for the confidence background (the "typical wrong-slope peak").
-/// Sampled coarsely: the median is a robust statistic of a smooth, low background, so a
-/// sparse sample matches the dense one at a fraction of the sorts. NOT windowed — a
-/// window-only background would be mostly near-diagonal, inflating the median and
-/// wrongly rejecting good overlaps.
+/// The full slope range; the beam's window is clamped to it.
 const BG_LO: f64 = 0.2;
 const BG_HI: f64 = 5.0;
-const BG_STEP: f64 = 0.3;
 /// Finest slope step; the beam refines down to this.
 const FINE_STEP: f64 = 0.02;
 
@@ -1287,75 +870,22 @@ fn top_k_distinct(
     kept
 }
 
-/// The first filter's null for [`BeamCfg::screen_z`]: the mean count of one `2·tol` offset
-/// window if the cloud's anchors were spread uniformly over its offset range, which at
-/// slope ~1 spans `a_ext + b_ext` events. One pass over the anchors, no sort.
-fn screen_lambda(anchors: &[Anchor], tol: f64) -> f64 {
-    let (mut amin, mut amax, mut bmin, mut bmax) = (u32::MAX, 0u32, u32::MAX, 0u32);
-    for x in anchors {
-        amin = amin.min(x.a_pos);
-        amax = amax.max(x.a_pos);
-        bmin = bmin.min(x.b_pos);
-        bmax = bmax.max(x.b_pos);
-    }
-    let range = (amax.saturating_sub(amin) as u64 + bmax.saturating_sub(bmin) as u64).max(1);
-    anchors.len() as f64 * 2.0 * tol / range as f64
-}
-
-/// A level-0 peak standardised against [`screen_lambda`]: `(peak - lam) / sqrt(max(lam, 1))`.
-pub fn screen_z(peak: usize, lam: f64) -> f64 {
-    (peak as f64 - lam) / lam.max(1.0).sqrt()
-}
-
-/// Stage 0b's statistic ([`BeamCfg::screen_null`]): the final gate's `z` taken at a level-0
-/// slope. `+inf` below [`SLOPE_MIN_ANCHORS`], where no line is fitted and the gate never
-/// runs, so the screen never decides such a pair.
-fn level0_null_z(anchors: &[Anchor], slope: f64, tol: f64) -> f64 {
-    diagonal_significance_parts(anchors, slope, tol).map_or(f64::INFINITY, |p| p.z)
-}
-
 /// Prior-windowed coarse→fine beam over slope. The peak is sought only inside
-/// `[win_lo, win_hi]` — the bin-DP/FBG cannot use far-off-slope diagonals, and excluding
+/// `[win_lo, win_hi]` — the FBG cannot use far-off-slope diagonals, and excluding
 /// them removes the competing off-window peaks that make a single-winner coarse pass
 /// lock onto the wrong basin. Each level keeps the top-`k` *distinct* basins and refines
 /// each at the next finer step: the coarse level only has to **nominate** the true basin
 /// into the beam (easy, and it degrades gracefully as the step coarsens), while the fine
 /// level **ranks** the shortlist by true apex.
 ///
-/// Returns the winning `(slope, peak, offset)`, the full-range background peaks (for
-/// the confidence median), whether the first filter ([`BeamCfg::screen_peak`])
-/// stopped the search after level 0 -- then the winner is the best level-0 sample -- and,
-/// with [`BeamCfg::select_z`], the last level's top-`k` distinct basins (highest count
-/// first; empty otherwise), among which [`fit_cloud`] picks by the gate's `z`.
-#[allow(clippy::type_complexity)]
-fn beam_search_slope(
-    cloud: &Cloud,
-    tol: f64,
-    beam: &BeamCfg,
-    conf_floor: f64,
-) -> (
-    (f64, usize, f64),
-    Option<Vec<usize>>,
-    bool,
-    Vec<(f64, usize, f64)>,
-) {
-    let anchors = cloud.anchors;
+/// Returns the winning `(slope, peak, offset)`.
+fn beam_search_slope(cloud: &Cloud, tol: f64, beam: &BeamCfg) -> (f64, usize, f64) {
     let lo = (beam.win_lo as f64).max(BG_LO);
     let hi = (beam.win_hi as f64).min(BG_HI).max(lo);
     let coarse = (beam.coarse_step as f64).max(FINE_STEP);
     let steps = step_schedule(coarse, FINE_STEP, beam.levels);
     let k = (beam.beam_k as usize).max(1);
     let sep = steps[0]; // "distinct basin" = at least one coarse step apart
-
-    // First filter, part 1: a window holds at most every anchor, so a cloud too small to
-    // reach the floor even if all of it sat in one window is screened before level 0.
-    let screen = beam.screen_peak as usize;
-    let screen_lam = (beam.screen_z > 0.0).then(|| screen_lambda(anchors, tol));
-    if (screen > 0 && anchors.len() < screen)
-        || screen_lam.is_some_and(|lam| screen_z(anchors.len(), lam) < beam.screen_z as f64)
-    {
-        return ((lo, anchors.len(), 0.0), None, true, Vec::new());
-    }
 
     // Level 0: coarse scan of the window; keep the top-k distinct basins. A small cloud is
     // swept here too, its order at the lowest slope kept for the last level, which starts there.
@@ -1377,22 +907,6 @@ fn beam_search_slope(
     } else {
         scan_candidates(cloud, tol, lo, hi, steps[0])
     };
-    // First filter, part 2: the densest level-0 window. Refinement and the null scan are
-    // what a random pair costs, and this stops them before they start.
-    let screen_null = beam.screen_null as f64;
-    if screen > 0 || screen_lam.is_some() || screen_null > 0.0 {
-        let best0 = level0
-            .iter()
-            .copied()
-            .reduce(|a, b| if b.1 > a.1 { b } else { a })
-            .unwrap_or((lo, 0, 0.0));
-        if best0.1 < screen
-            || screen_lam.is_some_and(|lam| screen_z(best0.1, lam) < beam.screen_z as f64)
-            || (screen_null > 0.0 && level0_null_z(anchors, best0.0, tol) < screen_null)
-        {
-            return (best0, None, true, Vec::new());
-        }
-    }
     let mut basins = top_k_distinct(level0, k, sep);
 
     // Refine: each finer level rescans ±(previous step) around each basin, dedups
@@ -1401,10 +915,9 @@ fn beam_search_slope(
         let (prev, step) = (steps[w - 1], steps[w]);
         // Of the last level only the winner is used: the first sample in
         // `top_k_distinct`'s order (highest peak, ties -> smaller slope). So there a
-        // slope is only measured if its peak can reach the best so far -- unless
-        // `select_z` ranks the last level's distinct basins too (`keep_all`).
+        // slope is only measured if its peak can reach the best so far.
         let last = w + 1 == steps.len();
-        let keep_all = !last || beam.select_z;
+        let keep_all = !last;
         let mut refined: Vec<(f64, usize, f64)> = Vec::new();
         let mut top: Option<(f64, usize, f64)> = None;
         let mut seen: FxHashSet<i64> = FxHashSet::default();
@@ -1458,14 +971,9 @@ fn beam_search_slope(
             top.into_iter().collect()
         };
     }
-    let finalists = if beam.select_z {
-        basins.clone()
-    } else {
-        Vec::new()
-    };
 
     // Winner = highest apex among the surviving basins (ties → smaller slope).
-    let best = basins
+    basins
         .into_iter()
         .reduce(|a, b| {
             if b.1 > a.1 || (b.1 == a.1 && b.0 < a.0) {
@@ -1474,102 +982,7 @@ fn beam_search_slope(
                 a
             }
         })
-        .unwrap_or((lo, 0, 0.0));
-
-    // The background exists only to supply the median in `peak_conf`, and
-    // `conf = peak / median` with `median >= 1` means `conf <= peak`. So a winner whose
-    // peak is already under the gate cannot clear it no matter what the background
-    // says, and its 17 extra sorts — a quarter of this pair's slope evaluations — are
-    // dead work. Skipping them cannot change which pairs are accepted; see
-    // `BinDp::exact_conf` for the one place the difference is observable.
-    if (best.1 as f64) < conf_floor {
-        return (best, None, false, finalists);
-    }
-
-    // Background over the full slope range (for conf); coarse but robust.
-    let bg_peaks: Vec<usize> = scan_candidates(cloud, tol, BG_LO, BG_HI, BG_STEP)
-        .into_iter()
-        .map(|(_, p, _)| p)
-        .collect();
-    (best, Some(bg_peaks), false, finalists)
-}
-
-/// Candidate first-filter statistics for one cloud, over the level-0 slope grid of
-/// [`beam_search_slope`]: what the screen tests check the live screen against.
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct ScreenStats {
-    /// Span of the cloud along read `a`, in events.
-    pub a_ext: u32,
-    /// Span of the cloud along read `b`, in events.
-    pub b_ext: u32,
-    /// Densest `2·tol` offset window, max over the coarse slopes -- what level 0 sees.
-    pub pk0: u32,
-    /// Densest `2·tol + (step/2)·b_ext` window, max over the coarse slopes. An exact
-    /// UPPER BOUND on the `2·tol` peak at every slope within half a coarse step of the
-    /// grid (which covers the whole beam window): moving the slope by `d` shifts an
-    /// anchor's offset by `d·b`, so a window at the finer slope spreads by at most
-    /// `|d|·b_ext` at the grid slope.
-    pub pkw: u32,
-    /// Sort-free bound on `pkw`: the densest pair of ADJACENT bins of an offset histogram
-    /// with bins of that widened width (a window of a bin's width touches at most two).
-    pub hb: u32,
-    /// The gate's null `z` at the level-0 slope holding `pk0` (the first such slope, as the
-    /// beam picks it) -- what [`BeamCfg::screen_null`] decides on.
-    pub zn0: f64,
-}
-
-/// [`ScreenStats`] for `anchors` at detection half-width `tol` over `beam`'s coarse grid.
-#[cfg(test)]
-pub fn screen_stats(anchors: &[Anchor], tol: f64, beam: &BeamCfg) -> ScreenStats {
-    if anchors.is_empty() {
-        return ScreenStats::default();
-    }
-    let (mut amin, mut amax, mut bmin, mut bmax) = (u32::MAX, 0u32, u32::MAX, 0u32);
-    for x in anchors {
-        amin = amin.min(x.a_pos);
-        amax = amax.max(x.a_pos);
-        bmin = bmin.min(x.b_pos);
-        bmax = bmax.max(x.b_pos);
-    }
-    let b_ext = bmax - bmin;
-    // The level-0 grid, exactly as `beam_search_slope` builds it.
-    let lo = (beam.win_lo as f64).max(BG_LO);
-    let hi = (beam.win_hi as f64).min(BG_HI).max(lo);
-    let step = (beam.coarse_step as f64).max(FINE_STEP);
-    let w0 = 2.0 * tol.max(1.0);
-    let ww = w0 + step / 2.0 * b_ext as f64;
-    let (mut cs, mut hist) = (Vec::with_capacity(anchors.len()), Vec::<u32>::new());
-    let (mut pk0, mut pkw, mut hb) = (0u32, 0u32, 0u32);
-    let mut m0 = lo;
-    let mut m = lo;
-    while m <= hi + 1e-9 {
-        cs.clear();
-        cs.extend(anchors.iter().map(|a| a.a_pos as f64 - m * a.b_pos as f64));
-        let cmin = cs.iter().copied().fold(f64::INFINITY, f64::min);
-        let cmax = cs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        hist.clear();
-        hist.resize(((cmax - cmin) / ww) as usize + 2, 0);
-        for &c in &cs {
-            hist[((c - cmin) / ww) as usize] += 1;
-        }
-        hb = hb.max(hist.windows(2).map(|w| w[0] + w[1]).max().unwrap_or(0));
-        cs.sort_unstable_by(f64::total_cmp);
-        let p0 = densest_window(&cs, w0).0 as u32;
-        if p0 > pk0 {
-            (pk0, m0) = (p0, m);
-        }
-        pkw = pkw.max(densest_window(&cs, ww).0 as u32);
-        m += step;
-    }
-    ScreenStats {
-        a_ext: amax - amin,
-        b_ext,
-        pk0,
-        pkw,
-        hb,
-        zn0: level0_null_z(anchors, m0, tol),
-    }
+        .unwrap_or((lo, 0, 0.0))
 }
 
 /// `f64` -> `i64` preserving [`f64::total_cmp`]'s order (the transform `total_cmp` itself
@@ -1642,7 +1055,7 @@ impl<'a> Cloud<'a> {
 }
 
 /// Offset cells per window in [`diagonal_peak`]'s histogram: finer cells prune more
-/// windows but cost more per pass. Measured on real clouds (`hough_bench`), 16 is best
+/// windows but cost more per pass. Measured on real clouds, 16 is best
 /// for full-length reads and 12 for clouds of a few hundred anchors.
 const PEAK_CELLS_BIG: usize = 16;
 const PEAK_CELLS_SMALL: usize = 12;
@@ -1945,7 +1358,7 @@ fn peak_at(cloud: &Cloud, m: f64, tol: f64) -> (usize, f64) {
 
 /// Clouds up to this many anchors have their slopes counted together ([`count_plans`]); larger
 /// ones one slope at a time, as their histograms (~2 n cells per slope, up to ~60 slopes) would
-/// outgrow the caches. Above it lie 0.02-0.08% of the pair loop's CPU (PAIRHIST, round 3).
+/// outgrow the caches. Above it lie 0.02-0.08% of the pair loop's CPU.
 const BATCH_MAX: usize = 1 << 14;
 
 /// Plan every slope of `ms` into `buf.plans`, count the histogram ones four slopes per pass over
@@ -2147,7 +1560,7 @@ fn sweeps(cloud: &Cloud, tol: f64) -> bool {
 
 /// [`peak_at`] along ascending slopes. Between slopes 0.02 apart a small cloud's offsets
 /// change order rarely (0.01-0.45 swaps per anchor on the A. thaliana and dmel clouds below
-/// 512 anchors, `hough_bench inversions`), so the previous slope's order, re-evaluated, is
+/// 512 anchors), so the previous slope's order, re-evaluated, is
 /// nearly sorted and an insertion pass orders it in `O(n + swaps)` where a fresh sort costs
 /// `O(n log n)`. The positions are kept permuted into that order, so each slope's offsets are
 /// computed in one sequential pass. Any sort gives the one sorted sequence of values, so each
@@ -2240,24 +1653,15 @@ mod tests {
 
         // Below SLOPE_MIN_ANCHORS: no line can be fitted at all.
         let few: Vec<Anchor> = (0..4).map(|i| Anchor { a_pos: i, b_pos: i }).collect();
-        assert_eq!(hough_aln(&few, &dp(), 3.0).reason, Reject::TooFewAnchors);
+        assert_eq!(hough_aln(&few, &dp()).reason, Reject::TooFewAnchors);
 
         // A clean diagonal is accepted.
         let clean: Vec<Anchor> = (0..120).map(|i| Anchor { a_pos: i, b_pos: i }).collect();
-        let ok = hough_aln(&clean, &dp(), 3.0);
+        let ok = hough_aln(&clean, &dp());
         assert!(ok.is_overlap());
         assert_eq!(ok.reason, Reject::Accepted);
 
-        // The SAME cloud under an unreachable min_conf fails on the conf gate -- and
-        // still reports the confidence it was measured at, which is the whole reason
-        // `conf` is carried on rejected results.
-        let gated = hough_aln(&clean, &dp(), 1e9);
-        assert!(!gated.is_overlap());
-        assert_eq!(gated.reason, Reject::Conf);
-        assert!(gated.conf > 0.0, "conf must survive a conf rejection");
-
         // Tags are what the dump writes; keep them stable.
-        assert_eq!(Reject::Conf.tag(), "conf");
         assert_eq!(Reject::Accepted.tag(), "accepted");
         assert_eq!(Reject::Gappy.tag(), "gappy");
     }
@@ -2283,7 +1687,7 @@ mod tests {
 
         let mut p = dp();
         p.max_gap = 0.6;
-        let tight = hough_aln(&sparse, &p, 3.0);
+        let tight = hough_aln(&sparse, &p);
         assert!(
             !tight.is_overlap(),
             "a 75%-gap smear must not be an overlap"
@@ -2293,7 +1697,7 @@ mod tests {
         // With the condition relaxed past the cloud's gap fraction the SAME cloud is
         // accepted, so the rejection is the gap floor and not one of the others.
         p.max_gap = 0.95;
-        let loose = hough_aln(&sparse, &p, 3.0);
+        let loose = hough_aln(&sparse, &p);
         assert!(loose.is_overlap(), "reason was {:?}", loose.reason);
         assert!(
             loose.gap as f64 > 0.6 * loose.aligned_bins as f64,
@@ -2305,95 +1709,22 @@ mod tests {
         // A dense diagonal of the same extent is unaffected either way.
         let clean: Vec<Anchor> = (0..240).map(|i| Anchor { a_pos: i, b_pos: i }).collect();
         p.max_gap = 0.6;
-        assert!(hough_aln(&clean, &p, 3.0).is_overlap());
+        assert!(hough_aln(&clean, &p).is_overlap());
     }
 
     fn dp() -> BinDp {
-        // Baseline-ish knobs sized for the synthetic tests: bin=4 events, e=2, and
-        // lightened penalties so a clean diagonal survives at the toy scale (the
-        // real preset penalties are exercised on the fixture, not here).
+        // Knobs sized for the synthetic tests: bin=4 events, e=2.
         BinDp {
             bin_events: 4.0,
             e: 2,
-            pgap: -2,
-            pvar: -3,
-            max_bgap: 4,
-            max_bvar: 4,
             min_aln_bins: 8,
             min_mat: 4,
-            min_sim: 0.05,
             max_gap: 0.6,
-            aln_var: 0.25,
             slope_beam: BeamCfg::default(),
             // Off: these toy clouds are sized for the geometry tests, not for the
             // significance gate.
             min_z: 0.0,
-            exact_conf: false,
         }
-    }
-
-    /// A clean slope-1 collinear anchor run is recovered end to end.
-    #[test]
-    fn slope1_collinear_recovered() {
-        let anchors: Vec<Anchor> = (0..80).map(|i| Anchor { a_pos: i, b_pos: i }).collect();
-        let aln = bin_dp(&anchors, 1.0, &dp());
-        assert!(aln.is_overlap(), "clean diagonal should be recovered");
-        // ~20 bins of 4 events; near-full coverage.
-        assert!(aln.aligned_bins >= 8, "aligned_bins={}", aln.aligned_bins);
-        assert!(aln.similarity > 0.3, "similarity={}", aln.similarity);
-    }
-
-    /// A slope-2 diagonal is under-recovered by the slope-1 baseline (it walks off
-    /// the band), but recovered when `bin_dp` is handed the diagonal's slope — pinning
-    /// both the wtdbg2 behavior and the rescaling.
-    #[test]
-    fn slope2_needs_rescaling() {
-        // a advances twice as fast as b: a = 2*i, b = i. Diagonal slope (a vs b) = 2.
-        let anchors: Vec<Anchor> = (0..80)
-            .map(|i| Anchor {
-                a_pos: 2 * i,
-                b_pos: i,
-            })
-            .collect();
-
-        let baseline = bin_dp(&anchors, 1.0, &dp());
-        assert!(
-            !baseline.is_overlap(),
-            "slope-1 baseline should under-recover a slope-2 diagonal (aligned_bins={}, sim={})",
-            baseline.aligned_bins,
-            baseline.similarity
-        );
-
-        let corrected = bin_dp(&anchors, 2.0, &dp());
-        assert!(
-            corrected.is_overlap(),
-            "rescaling by the true slope should recover the overlap"
-        );
-        assert!(
-            corrected.aligned_bins >= 8,
-            "aligned_bins={}",
-            corrected.aligned_bins
-        );
-    }
-
-    /// An anti-collinear (reversed) anchor set is a null — nothing should pass.
-    #[test]
-    fn anticollinear_finds_nothing() {
-        let anchors: Vec<Anchor> = (0..80)
-            .map(|i| Anchor {
-                a_pos: i,
-                b_pos: 79 - i,
-            })
-            .collect();
-        let aln = bin_dp(&anchors, 1.0, &dp());
-        assert!(!aln.is_overlap(), "reversed diagonal must not be accepted");
-    }
-
-    #[test]
-    fn empty_anchors_is_empty() {
-        let aln = bin_dp(&[], 1.0, &dp());
-        assert!(!aln.is_overlap());
-        assert_eq!(aln.aligned_bins, 0);
     }
 
     /// Deterministic LCG so the noise tests are reproducible.
@@ -2630,187 +1961,6 @@ mod tests {
         }
     }
 
-    /// The live first filter decides exactly what the screen statistic predicts: a pair is
-    /// `Reject::Screen` iff its level-0 peak `ScreenStats::pk0` is under the floor, and a
-    /// clean diagonal above it is still accepted.
-    #[test]
-    fn hough_screen_rejects_exactly_below_the_level0_peak() {
-        let mut d = dp();
-        d.slope_beam.screen_peak = 15;
-        let tol = d.bin_events.max(1.0);
-        let mut s = 21u64;
-        let (mut screened, mut kept) = (0, 0);
-        for trial in 0..60u32 {
-            let n_diag = (trial % 30) as usize;
-            let mut anchors: Vec<Anchor> = (0..n_diag)
-                .map(|i| {
-                    let b = 200 + i as u32 * 90;
-                    Anchor {
-                        // On the level-0 grid (1.1): at this toy `tol` (4 events) an
-                        // off-grid diagonal smears across coarse windows.
-                        a_pos: 700 + (1.1 * b as f64) as u32 + lcg(&mut s) % 3,
-                        b_pos: b,
-                    }
-                })
-                .collect();
-            anchors.extend((0..(10 + trial as usize * 7)).map(|_| Anchor {
-                a_pos: lcg(&mut s) % 4000,
-                b_pos: lcg(&mut s) % 4000,
-            }));
-            let pk0 = screen_stats(&anchors, tol, &d.slope_beam).pk0;
-            let aln = hough_aln(&anchors, &d, 0.0);
-            assert_eq!(
-                aln.reason == Reject::Screen,
-                pk0 < 15,
-                "trial {trial}: pk0 {pk0}, {aln:?}"
-            );
-            if aln.reason == Reject::Screen {
-                screened += 1;
-            } else {
-                kept += 1;
-            }
-        }
-        assert!(screened > 0 && kept > 0, "{screened} screened, {kept} kept");
-        // Fewer anchors than the floor: screened without any scan.
-        let few: Vec<Anchor> = (0..10)
-            .map(|i| Anchor {
-                a_pos: i * 50,
-                b_pos: i * 50,
-            })
-            .collect();
-        assert_eq!(hough_aln(&few, &d, 0.0).reason, Reject::Screen);
-        // A clean diagonal well above the floor is untouched by it.
-        let clean: Vec<Anchor> = (0..120).map(|i| Anchor { a_pos: i, b_pos: i }).collect();
-        let mut off = d;
-        off.slope_beam.screen_peak = 0;
-        let (a, b) = (hough_aln(&clean, &d, 0.0), hough_aln(&clean, &off, 0.0));
-        assert!(a.is_overlap());
-        assert_eq!(
-            (a.slope, a.aligned_bins, a.path.clone()),
-            (b.slope, b.aligned_bins, b.path)
-        );
-    }
-
-    /// The density-normalised filter decides exactly what the screen formula predicts from
-    /// `ScreenStats` (`lam = n * 2*tol / (a_ext + b_ext)`), across clouds
-    /// from bare scatter to a clean diagonal.
-    #[test]
-    fn hough_screen_z_matches_the_screen_formula() {
-        let mut d = dp();
-        d.slope_beam.screen_z = 5.0;
-        let tol = d.bin_events.max(1.0);
-        let mut s = 33u64;
-        let (mut screened, mut kept) = (0, 0);
-        for trial in 0..80u32 {
-            let n_diag = (trial % 40) as usize;
-            let mut anchors: Vec<Anchor> = (0..n_diag)
-                .map(|i| {
-                    let b = 100 + i as u32 * 60;
-                    Anchor {
-                        a_pos: 500 + (0.9 * b as f64) as u32 + lcg(&mut s) % 3,
-                        b_pos: b,
-                    }
-                })
-                .collect();
-            // At least SLOPE_MIN_ANCHORS, below which no line is fitted and the screen
-            // is never reached.
-            anchors.extend(
-                (0..(SLOPE_MIN_ANCHORS + trial as usize * 3)).map(|_| Anchor {
-                    a_pos: lcg(&mut s) % 3000,
-                    b_pos: lcg(&mut s) % 3000,
-                }),
-            );
-            let st = screen_stats(&anchors, tol, &d.slope_beam);
-            let lam = anchors.len() as f64 * 2.0 * tol / ((st.a_ext + st.b_ext).max(1) as f64);
-            let want = (st.pk0 as f64 - lam) / lam.max(1.0).sqrt() < 5.0;
-            let got = hough_aln(&anchors, &d, 0.0).reason == Reject::Screen;
-            assert_eq!(got, want, "trial {trial}: pk0 {} lam {lam:.2}", st.pk0);
-            if got {
-                screened += 1;
-            } else {
-                kept += 1;
-            }
-        }
-        assert!(screened > 0 && kept > 0, "{screened} screened, {kept} kept");
-    }
-
-    /// The stage-0b screen rejects exactly when the screen statistic `ScreenStats::zn0` (the
-    /// gate's null `z` at the level-0 slope) is under the threshold.
-    #[test]
-    fn hough_screen_null_matches_the_screen_statistic() {
-        let mut d = dp();
-        d.slope_beam.screen_null = 2.0;
-        let tol = d.bin_events.max(1.0);
-        let mut s = 71u64;
-        let (mut screened, mut kept) = (0, 0);
-        for trial in 0..80u32 {
-            let n_diag = (trial % 40) as usize;
-            let mut anchors: Vec<Anchor> = (0..n_diag)
-                .map(|i| {
-                    let b = 100 + i as u32 * 60;
-                    Anchor {
-                        a_pos: 500 + (0.9 * b as f64) as u32 + lcg(&mut s) % 3,
-                        b_pos: b,
-                    }
-                })
-                .collect();
-            anchors.extend(
-                (0..(SLOPE_MIN_ANCHORS + trial as usize * 3)).map(|_| Anchor {
-                    a_pos: lcg(&mut s) % 3000,
-                    b_pos: lcg(&mut s) % 3000,
-                }),
-            );
-            let st = screen_stats(&anchors, tol, &d.slope_beam);
-            let want = st.zn0 < 2.0;
-            let got = hough_aln(&anchors, &d, 0.0).reason == Reject::Screen;
-            assert_eq!(got, want, "trial {trial}: zn0 {:.3}", st.zn0);
-            if got {
-                screened += 1;
-            } else {
-                kept += 1;
-            }
-        }
-        assert!(screened > 0 && kept > 0, "{screened} screened, {kept} kept");
-    }
-
-    /// `ScreenStats::pkw` really bounds the peak at every fine slope the beam can visit,
-    /// and `hb` bounds `pkw`, on clouds with an embedded diagonal at slopes on and between
-    /// the coarse grid points.
-    #[test]
-    fn screen_stats_bound_the_fine_peak() {
-        let beam = BeamCfg::default();
-        let tol = 192.0;
-        let mut s = 5u64;
-        for &(slope, n_diag, n_bg) in &[
-            (1.0, 40, 60),
-            (0.83, 25, 400),
-            (1.37, 60, 30),
-            (0.7, 5, 2000),
-        ] {
-            let mut anchors: Vec<Anchor> = (0..n_diag)
-                .map(|i| {
-                    let b = 300 + i * 70;
-                    Anchor {
-                        a_pos: (500.0 + slope * b as f64) as u32 + lcg(&mut s) % 90,
-                        b_pos: b,
-                    }
-                })
-                .collect();
-            anchors.extend((0..n_bg).map(|_| Anchor {
-                a_pos: lcg(&mut s) % 9000,
-                b_pos: lcg(&mut s) % 9000,
-            }));
-            let st = screen_stats(&anchors, tol, &beam);
-            assert!(st.pk0 <= st.pkw && st.pkw <= st.hb, "{st:?}");
-            let mut m = beam.win_lo as f64;
-            while m <= beam.win_hi as f64 + 1e-9 {
-                let (p, _) = peak_at(&Cloud::new(&anchors), m, tol);
-                assert!(p as u32 <= st.pkw, "slope {m}: peak {p} > bound {}", st.pkw);
-                m += 0.01;
-            }
-        }
-    }
-
     /// The concentration estimator recovers an off-1 slope (0.8) even when it is
     /// half-buried in off-diagonal noise.
     #[test]
@@ -2826,7 +1976,7 @@ mod tests {
             a_pos: lcg(&mut s) % 300,
             b_pos: lcg(&mut s) % 300,
         }));
-        let slope = estimate_diagonal_fit(&anchors, 8, &BeamCfg::default(), 0.0)
+        let slope = estimate_diagonal_fit(&anchors, 8, &BeamCfg::default())
             .unwrap()
             .slope;
         assert!(
@@ -2835,28 +1985,8 @@ mod tests {
         );
     }
 
-    /// The confidence: pure scatter has no dominant diagonal, so its peak does not stand
-    /// above the wrong-slope background (the preset `hough_min_conf` is 6).
-    #[test]
-    fn fit_confidence_rejects_pure_noise() {
-        let mut s = 12345u64;
-        let anchors: Vec<Anchor> = (0..500)
-            .map(|_| Anchor {
-                a_pos: lcg(&mut s) % 1000,
-                b_pos: lcg(&mut s) % 1000,
-            })
-            .collect();
-        let conf = estimate_diagonal_fit(&anchors, 8, &BeamCfg::default(), 0.0)
-            .unwrap()
-            .conf;
-        assert!(
-            conf < 6.0,
-            "pure noise must not yield a confident diagonal ({conf})"
-        );
-    }
-
     /// The fit recovers both the off-1 slope AND the intercept through noise
-    /// (a = 0.8·b + 5); pure noise does not clear the confidence gate.
+    /// (a = 0.8·b + 5).
     #[test]
     fn fit_recovers_slope_and_intercept() {
         let mut anchors: Vec<Anchor> = (0..300)
@@ -2870,27 +2000,12 @@ mod tests {
             a_pos: lcg(&mut s) % 300,
             b_pos: lcg(&mut s) % 300,
         }));
-        let fit = estimate_diagonal_fit(&anchors, 8, &BeamCfg::default(), 0.0).unwrap();
+        let fit = estimate_diagonal_fit(&anchors, 8, &BeamCfg::default()).unwrap();
         let (slope, intercept) = (fit.slope, fit.intercept);
         assert!((slope - 0.8).abs() < 0.1, "slope ~0.8, got {slope}");
         assert!(
             (intercept - 5.0).abs() < 15.0,
             "intercept ~5, got {intercept}"
-        );
-
-        let mut s = 12345u64;
-        let noise: Vec<Anchor> = (0..500)
-            .map(|_| Anchor {
-                a_pos: lcg(&mut s) % 1000,
-                b_pos: lcg(&mut s) % 1000,
-            })
-            .collect();
-        let conf = estimate_diagonal_fit(&noise, 8, &BeamCfg::default(), 0.0)
-            .unwrap()
-            .conf;
-        assert!(
-            conf < 6.0,
-            "pure noise must yield no confident diagonal ({conf})"
         );
     }
 
@@ -2902,31 +2017,12 @@ mod tests {
     fn hough_recovers_diagonal_across_a_gap() {
         let mut anchors: Vec<Anchor> = (0..40).map(|i| Anchor { a_pos: i, b_pos: i }).collect();
         anchors.extend((60..120).map(|i| Anchor { a_pos: i, b_pos: i }));
-        let aln = hough_aln(&anchors, &dp(), 3.0);
+        let aln = hough_aln(&anchors, &dp());
         assert!(aln.is_overlap(), "Hough should recover the gapped diagonal");
         // Extent spans the whole 0..120 events (~30 bins of 4), across the hole.
         assert!(aln.aligned_bins >= 25, "aligned_bins={}", aln.aligned_bins);
         assert!(!aln.path.is_empty());
         assert_eq!(aln.a_bin_span.0, 0);
-    }
-
-    /// The Hough significance gate rejects a diffuse (non-overlapping) anchor cloud:
-    /// pure scatter has no dominant diagonal, so confidence stays low and nothing is
-    /// emitted.
-    #[test]
-    fn hough_rejects_diffuse_cloud() {
-        let mut s = 12345u64;
-        let noise: Vec<Anchor> = (0..500)
-            .map(|_| Anchor {
-                a_pos: lcg(&mut s) % 1000,
-                b_pos: lcg(&mut s) % 1000,
-            })
-            .collect();
-        let aln = hough_aln(&noise, &dp(), 6.0);
-        assert!(
-            !aln.is_overlap(),
-            "diffuse cloud must not pass the Hough gate"
-        );
     }
 
     /// An off-1 (event-rate-mismatched) diagonal is recovered without any external
@@ -2946,7 +2042,7 @@ mod tests {
             a_pos: lcg(&mut s) % 160,
             b_pos: lcg(&mut s) % 120,
         }));
-        let aln = hough_aln(&anchors, &dp(), 3.0);
+        let aln = hough_aln(&anchors, &dp());
         assert!(
             aln.is_overlap(),
             "Hough should recover the slope-1.3 diagonal"
@@ -2955,23 +2051,6 @@ mod tests {
             (aln.slope - 1.3).abs() < 0.15,
             "slope ~1.3, got {}",
             aln.slope
-        );
-    }
-
-    /// The beam keeps a confidence gate, so it must reject a diffuse cloud.
-    #[test]
-    fn beam_rejects_diffuse_cloud() {
-        let mut s = 12345u64;
-        let noise: Vec<Anchor> = (0..500)
-            .map(|_| Anchor {
-                a_pos: lcg(&mut s) % 1000,
-                b_pos: lcg(&mut s) % 1000,
-            })
-            .collect();
-        let aln = hough_aln(&noise, &dp(), 6.0);
-        assert!(
-            !aln.is_overlap(),
-            "coarse-to-fine must still reject a diffuse cloud"
         );
     }
 
@@ -2988,9 +2067,7 @@ mod tests {
             b_pos: b,
         }));
         let beam = BeamCfg::default(); // window [0.7, 1.4]
-        let s_beam = estimate_diagonal_fit(&anchors, 4, &beam, 0.0)
-            .unwrap()
-            .slope;
+        let s_beam = estimate_diagonal_fit(&anchors, 4, &beam).unwrap().slope;
         assert!(
             (s_beam - 1.0).abs() < 0.1,
             "beam stays in the prior window on the usable diagonal, got {s_beam}"
@@ -3013,8 +2090,8 @@ mod tests {
         let base = BeamCfg::default(); // coarse grid 0.7, 0.9, 1.1, 1.3
         let k1 = BeamCfg { beam_k: 1, ..base };
         let k3 = BeamCfg { beam_k: 3, ..base };
-        let s1 = estimate_diagonal_fit(&anchors, 4, &k1, 0.0).unwrap().slope;
-        let s3 = estimate_diagonal_fit(&anchors, 4, &k3, 0.0).unwrap().slope;
+        let s1 = estimate_diagonal_fit(&anchors, 4, &k1).unwrap().slope;
+        let s3 = estimate_diagonal_fit(&anchors, 4, &k3).unwrap().slope;
         assert!(
             (s1 - 1.3).abs() < 0.1,
             "k=1 loses the true basin to the on-grid competitor, got {s1}"
@@ -3364,271 +2441,23 @@ mod tests {
     #[test]
     fn hough_path_is_sorted_and_unique() {
         let anchors: Vec<Anchor> = (0..120).map(|i| Anchor { a_pos: i, b_pos: i }).collect();
-        let aln = hough_aln(&anchors, &dp(), 3.0);
+        let aln = hough_aln(&anchors, &dp());
         assert!(aln.is_overlap());
         for w in aln.path.windows(2) {
             assert!(w[0] < w[1], "path must be strictly increasing & unique");
         }
     }
 
-    /// The confidence shortcut (skip the background scan when `peak < min_conf`) is
-    /// sound **only because** `peak_conf` floors the median at 1, making `conf <= peak`.
-    /// A median below 1 would put `conf` *above* the peak and the shortcut would begin
-    /// discarding pairs that should pass. That floor is load-bearing for correctness,
-    /// not merely a divide-by-zero guard — pin it here, including the all-zero
-    /// background that is the only way to reach it.
-    #[test]
-    fn conf_never_exceeds_the_peak() {
-        let peak = 6usize;
-        for peaks in [
-            vec![0usize; 17],          // background never fires -> median floored to 1
-            vec![0, 0, 0, 0, 0, 1, 2], // median is 0 before the floor
-            vec![1usize; 17],
-            vec![5, 7, 9, 11, 13, 2, 3],
-        ] {
-            let conf = peak_conf(peak, peaks.clone());
-            assert!(
-                conf <= peak as f64,
-                "conf {conf} exceeded peak {peak} for background {peaks:?} — the \
-                 min_conf shortcut in `beam_search_slope` is unsound without conf <= peak"
-            );
-        }
-    }
-
-    /// With the gate OFF (`min_conf <= 0`) every pair skips the confidence background.
-    /// That must change no accept decision and no field of an accepted result except
-    /// `conf` itself, which becomes the peak bound (never below the exact ratio).
-    #[test]
-    fn gate_off_skips_background_and_changes_only_conf() {
-        let mut s = 0x9E37_79B9_7F4A_7C15u64;
-        let mut rnd = |m: u32| -> u32 {
-            s ^= s << 13;
-            s ^= s >> 7;
-            s ^= s << 17;
-            (s >> 11) as u32 % m.max(1)
-        };
-        let (mut accepted, mut differed) = (0, 0);
-        for on_diag in [0usize, 5, 12, 40, 160] {
-            for scatter in [0usize, 50, 200] {
-                let mut anchors: Vec<Anchor> = (0..on_diag)
-                    .map(|i| Anchor {
-                        a_pos: (i as u32) * 3,
-                        b_pos: (i as u32) * 3,
-                    })
-                    .collect();
-                anchors.extend((0..scatter).map(|_| Anchor {
-                    a_pos: rnd(1000),
-                    b_pos: rnd(1000),
-                }));
-                let fast = dp();
-                let mut exact = fast;
-                exact.exact_conf = true;
-                let a = hough_aln(&anchors, &fast, 0.0);
-                let b = hough_aln(&anchors, &exact, 0.0);
-                assert_eq!(a.is_overlap(), b.is_overlap());
-                assert_eq!(a.reason, b.reason);
-                assert_eq!(a.path, b.path);
-                assert_eq!(a.a_bin_span, b.a_bin_span);
-                assert_eq!(a.b_bin_span, b.b_bin_span);
-                assert_eq!(a.matched, b.matched);
-                assert_eq!(a.cnt, b.cnt);
-                assert_eq!(a.aligned_bins, b.aligned_bins);
-                assert_eq!(a.gap, b.gap);
-                assert_eq!(a.slope.to_bits(), b.slope.to_bits());
-                assert_eq!(a.intercept.to_bits(), b.intercept.to_bits());
-                assert!(a.conf >= b.conf, "bound {} below exact {}", a.conf, b.conf);
-                accepted += a.is_overlap() as usize;
-                differed += (a.conf.to_bits() != b.conf.to_bits()) as usize;
-            }
-        }
-        assert!(accepted > 0, "nothing accepted — test would be vacuous");
-        assert!(
-            differed > 0,
-            "background never skipped — test would be vacuous"
-        );
-    }
-
-    /// `BinDp::exact_conf` must be a pure performance switch: skipping the confidence
-    /// background for pairs whose peak already fails the gate cannot change which pairs
-    /// `hough_aln` accepts, nor any field it reports about an accepted one.
-    ///
-    /// Sweeps planted diagonals of varying density mixed with scatter so both branches
-    /// are exercised — asserted at the end, since a run where the shortcut never fired
-    /// would pass vacuously.
-    #[test]
-    fn conf_shortcut_changes_no_accept_decision() {
-        let mut s = 0x243F_6A88_85A3_08D3u64;
-        let mut rnd = |m: u32| -> u32 {
-            s ^= s << 13;
-            s ^= s >> 7;
-            s ^= s << 17;
-            (s >> 11) as u32 % m.max(1)
-        };
-        let (mut skipped, mut accepted) = (0, 0);
-        for on_diag in [0usize, 2, 5, 8, 12, 20, 40, 80, 160] {
-            for scatter in [0usize, 10, 50, 200] {
-                let mut anchors: Vec<Anchor> = (0..on_diag)
-                    .map(|i| Anchor {
-                        a_pos: (i as u32) * 3,
-                        b_pos: (i as u32) * 3,
-                    })
-                    .collect();
-                anchors.extend((0..scatter).map(|_| Anchor {
-                    a_pos: rnd(1000),
-                    b_pos: rnd(1000),
-                }));
-
-                let fast = dp(); // exact_conf = false (production)
-                let mut exact = fast;
-                exact.exact_conf = true;
-                let min_conf = 6.0;
-
-                let a = hough_aln(&anchors, &fast, min_conf);
-                let b = hough_aln(&anchors, &exact, min_conf);
-                assert_eq!(
-                    a.is_overlap(),
-                    b.is_overlap(),
-                    "accept decision diverged at on_diag={on_diag} scatter={scatter}"
-                );
-                if a.is_overlap() {
-                    accepted += 1;
-                    // Accepted pairs always evaluate the background, so every field —
-                    // `conf` included — must match bit for bit.
-                    assert_eq!(a.matched, b.matched);
-                    assert_eq!(a.cnt, b.cnt);
-                    assert_eq!(a.aligned_bins, b.aligned_bins);
-                    assert_eq!(a.gap, b.gap);
-                    assert_eq!(a.path, b.path);
-                    assert_eq!(a.a_bin_span, b.a_bin_span);
-                    assert_eq!(a.b_bin_span, b.b_bin_span);
-                    assert_eq!(a.slope.to_bits(), b.slope.to_bits());
-                    assert_eq!(a.conf.to_bits(), b.conf.to_bits());
-                } else if a.conf.to_bits() != b.conf.to_bits() {
-                    // The one permitted difference: a rejected pair may report the
-                    // upper bound `peak` in place of the exact ratio. It must still be
-                    // an upper bound, and must still fail the gate.
-                    skipped += 1;
-                    assert!(
-                        a.conf >= b.conf,
-                        "shortcut conf {} below exact {}",
-                        a.conf,
-                        b.conf
-                    );
-                    assert!(
-                        a.conf < min_conf,
-                        "shortcut conf {} cleared the gate",
-                        a.conf
-                    );
-                }
-            }
-        }
-        assert!(skipped > 0, "shortcut never fired — test would be vacuous");
-        assert!(
-            accepted > 0,
-            "nothing was ever accepted — test would be vacuous"
-        );
-    }
-
-    /// The detection settings of `haricot assemble`, with `select_z` as given.
-    fn production_dp(select_z: bool) -> BinDp {
+    /// The detection settings of `haricot assemble`.
+    fn production_dp() -> BinDp {
         let mut op = crate::params::Params::r10_4_1().overlap;
-        op.hough = true;
-        op.hough_min_conf = 0.0;
         op.hough_min_z = 3.0;
         op.null_gate = true;
         op.null_z = 4.0;
         op.min_aln_bins = 4;
         op.max_seed_occ = 2000;
         op.bin_events = 192;
-        op.slope_beam.select_z = select_z;
         BinDp::from_params(&op, 8)
-    }
-
-    fn xorshift(mut s: u64) -> impl FnMut() -> u64 {
-        move || {
-            s ^= s << 13;
-            s ^= s >> 7;
-            s ^= s << 17;
-            s
-        }
-    }
-
-    fn mirror(cloud: &[Anchor]) -> Vec<Anchor> {
-        cloud
-            .iter()
-            .map(|x| Anchor {
-                a_pos: x.b_pos,
-                b_pos: x.a_pos,
-            })
-            .collect()
-    }
-
-    /// A true overlap `a = b + 5000`
-    /// plus a dense repeat block (a in [0, 200) x b in [16000, 20000)). The block's raw window
-    /// count wins at the window edge, where `z` is ~0; with `select_z` the slope is chosen by
-    /// `z`, so the diagonal (z > 20) is found in BOTH read orders, at slope ~1.
-    #[test]
-    fn select_z_finds_a_diagonal_an_edge_basin_outcounts() {
-        let mut r = xorshift(0x2545_f491_4f6c_dd1d);
-        let mut cloud: Vec<Anchor> = (0..15_000u32)
-            .step_by(40)
-            .map(|b| Anchor {
-                a_pos: b + 5000,
-                b_pos: b,
-            })
-            .collect();
-        for _ in 0..3000 {
-            cloud.push(Anchor {
-                a_pos: (r() % 200) as u32,
-                b_pos: 16_000 + (r() % 4000) as u32,
-            });
-        }
-        assert!(diagonal_significance(&cloud, 1.0, 192.0) > 20.0);
-        let d = production_dp(true);
-        for (name, c) in [("as given", cloud.clone()), ("mirrored", mirror(&cloud))] {
-            let x = hough_aln(&c, &d, 0.0);
-            assert!(
-                x.is_overlap() && (x.slope - 1.0).abs() < 0.05,
-                "{name}: {:?} at slope {:.4}",
-                x.reason,
-                x.slope
-            );
-        }
-    }
-
-    /// With one clear diagonal (and uniform noise) the z pick is the count winner: `select_z`
-    /// changes nothing, the fitted line and the verdict are identical.
-    #[test]
-    fn select_z_keeps_a_single_diagonal_fit() {
-        let mut r = xorshift(0x9e37_79b9_7f4a_7c15);
-        for trial in 0..20u64 {
-            let slope = 0.85 + 0.015 * trial as f64;
-            let mut cloud: Vec<Anchor> = (0..8000u32)
-                .step_by(30)
-                .map(|b| Anchor {
-                    a_pos: (slope * b as f64) as u32 + 3000,
-                    b_pos: b,
-                })
-                .collect();
-            for _ in 0..200 {
-                cloud.push(Anchor {
-                    a_pos: (r() % 12_000) as u32,
-                    b_pos: (r() % 8000) as u32,
-                });
-            }
-            let (x, y) = (
-                hough_aln(&cloud, &production_dp(false), 0.0),
-                hough_aln(&cloud, &production_dp(true), 0.0),
-            );
-            assert!(x.is_overlap(), "trial {trial}: {:?}", x.reason);
-            assert_eq!(x.slope.to_bits(), y.slope.to_bits(), "trial {trial}");
-            assert_eq!(
-                x.intercept.to_bits(),
-                y.intercept.to_bits(),
-                "trial {trial}"
-            );
-            assert_eq!(x.path, y.path, "trial {trial}");
-        }
     }
 
     /// Every field of an alignment, floats by their bits.
@@ -3646,7 +2475,7 @@ mod tests {
             "{:?} {:?} {:?} {:?} {:?}",
             (a.matched, a.cnt, a.aligned_bins, a.gap, a.reason),
             (a.a_bin_span, a.b_bin_span, a.similarity.to_bits()),
-            (a.slope.to_bits(), a.intercept.to_bits(), a.conf.to_bits()),
+            (a.slope.to_bits(), a.intercept.to_bits()),
             null,
             a.path
         )
@@ -3716,10 +2545,10 @@ mod tests {
 
     /// `hough_aln` answers bit for bit alike under the baseline and the AVX2 kernels, and with
     /// small clouds swept or counted, on clouds of every size the detector
-    /// meets, with and without a diagonal, with and without `select_z`.
+    /// meets, with and without a diagonal.
     #[test]
     fn hough_aln_is_the_same_under_every_kernel_and_path() {
-        let (d, dz) = (production_dp(false), production_dp(true));
+        let d = production_dp();
         let mut clouds = test_clouds();
         let mut s = 31u64;
         for &n in &[20usize, 90, 200, 300, 450, 700, 1500, 3000] {
@@ -3744,15 +2573,12 @@ mod tests {
             }
         }
         for (i, anchors) in clouds.iter().enumerate() {
-            let mut first: Option<(String, String)> = None;
+            let mut first: Option<String> = None;
             for avx in [false, true] {
                 for no_sweep in [false, true] {
                     kernel::force(Some(avx));
                     NO_SWEEP.with(|c| c.set(Some(no_sweep)));
-                    let got = (
-                        aln_key(&hough_aln(anchors, &d, 0.0)),
-                        aln_key(&hough_aln(anchors, &dz, 0.0)),
-                    );
+                    let got = aln_key(&hough_aln(anchors, &d));
                     match &first {
                         None => first = Some(got),
                         Some(f) => assert_eq!(

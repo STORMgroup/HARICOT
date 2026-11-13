@@ -6,9 +6,9 @@ fragment graph (asm.ctg.dot or .dot.gz: `F<n> [label=...` nodes, `F<a> -> F<b>` 
 
 Usage: components.py GRAPH.{gfa,dot,dot.gz} [GRAPH ...]   -> one line per graph: path<TAB>segments<TAB>components
 """
+import argparse
 import gzip
 import re
-import sys
 
 
 def read_gfa(path):
@@ -55,9 +55,9 @@ def components(segs, links):
 
 
 def main():
-    if len(sys.argv) < 2:
-        sys.exit(__doc__)
-    for path in sys.argv[1:]:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("graphs", nargs="+", metavar="GRAPH")
+    for path in ap.parse_args().graphs:
         dot = path.endswith(".dot") or path.endswith(".dot.gz")
         segs, links = read_dot(path) if dot else read_gfa(path)
         n, c = components(segs, links)

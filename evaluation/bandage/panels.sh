@@ -10,7 +10,7 @@
 # CONTIG, 0 -> 0.85 along it; dark grey: on another contig; light grey: not aligned. HARICOT's unitigs are placed by
 # its sequence (score.sh's ours_seq.fa, one record per unitig), wtdbg2's contigs drawn as a graph without links.
 # Each panel: BandageNG (2000 x 1500 px) over --layouts random layouts, the least folded kept (pick_best.py).
-# Tools on PATH: BandageNG, minimap2; Python with numpy and Pillow.
+# Tools on PATH: BandageNG, minimap2; Python with numpy, scipy and Pillow.
 set -uo pipefail
 usage() { sed -n '4,4p' "$0" | sed 's/^# *//'; exit 2; }
 HERE=$(cd "$(dirname "$0")" && pwd)

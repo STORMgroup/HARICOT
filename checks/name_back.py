@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """A haricot assemble run on renamed reads (pod5_variant.py --mode reno / renr), with its read ids mapped back to the
-source pod5's, so sym_compare.py reads it as a run on the source reads.
+source pod5's, so sym_compare.py reads it as a run on the source reads. invariance.sh runs it.
 
 Copies RUN to OUT: every .tsv / .gfa / .txt file with each tab-separated field that is a renamed id replaced by its
 source id; every other file except the .bin caches (the comparator reads their canonical dumps) as it is. RUN is only
@@ -8,13 +8,19 @@ read.
 
 Usage: name_back.py RUN MAP OUT     (MAP: `dst_id<TAB>src_id` per read, pod5_variant.py's)
 """
+import argparse
 import os
 import shutil
 import sys
 
 
 def main():
-    run, mp, out = sys.argv[1:4]
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("run", help="the run on the renamed reads")
+    ap.add_argument("map", help="pod5_variant.py's --map")
+    ap.add_argument("out", help="the run with the source ids (written; replaced if it exists)")
+    a = ap.parse_args()
+    run, mp, out = a.run, a.map, a.out
     back = {}
     with open(mp) as f:
         for line in f:

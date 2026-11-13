@@ -6,11 +6,11 @@ partners, neighbour scores, rank) for every candidate stage 1 accepted at its fr
 threshold, merged with that candidate's stage-1 features and score. Labels are the exact ones
 (`haricot-pair-features`). Trained on the training genomes (stage-1 scores there are OUT-OF-BAG, so stage 2
 never sees in-sample scores), thresholds frozen on stage-2 out-of-bag scores at a fixed share of
-the accepted true candidates kept, applied unchanged to the test datasets.
+the accepted true candidates kept, applied unchanged to the test datasets. training/train.sh runs it.
 
-Writes per test dataset and operating point a drop list for `haricot-ovl-filter --drop-pairs` that removes
-EVERY candidate not kept: the ones stage 1 rejected plus the ones stage 2 rejects, so it applies
-to the permissive cache directly.
+Writes the thresholds, features and seeds (TAG.thresholds.json), and per test set its scores (TAG__KEY.scores.tsv)
+and, per operating point, a drop list of every candidate not kept, the ones stage 1 rejected plus the ones stage 2
+rejects (TAG__KEY__keepK.drop.tsv: name_a name_b).
 
 Training rows are drawn (the cap) and ordered (`canon_order`) by their values only, as in train_stage1.py, so renaming
 the reads or reordering the tables gives the same forests; `--exclude-reads FILE` drops every row naming a listed read
@@ -50,9 +50,9 @@ def load(fdir, sdir, key):
 
 def stage2_selection(f, cap, true_only=False, excl=()):
     """The stage-1 rows of one set (its full feature table `f`, with `key`) that stage 2 may train on under
-    `--cap-per-set CAP`: train_stage1.cap_mask's class-stratified selection. With `true_only` (`--cap-true-only`)
-    the cap applies to the true rows only: the true rows are cap_mask's (the same rows),
-    and every other labelled row (false, misplaced) is kept. Rows naming a read of `excl` are never selected."""
+    `--cap-per-set CAP`: train_stage1.cap_mask's class-stratified selection, the rows stage 1 trained on. With
+    `true_only` (`--cap-true-only`) the cap applies to the true rows only: the true rows are cap_mask's (the same
+    rows), and every other labelled row (false, misplaced) is kept. Rows naming a read of `excl` are never selected."""
     ex = excluded_mask(f, list(excl))
     m = cap_mask(f, cap, exclude=ex)
     if true_only:
@@ -61,18 +61,22 @@ def stage2_selection(f, cap, true_only=False, excl=()):
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--train", required=True)
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--train", required=True, help="comma list of training sets")
     ap.add_argument("--test", default="", help="comma list of sets to score with the trained forests (printed)")
     ap.add_argument("--tag", required=True)
     ap.add_argument("--keep", default="0.995,0.99,0.98,0.95")
     ap.add_argument("--features-dir", required=True)
     ap.add_argument("--s2-dir", required=True)
     ap.add_argument("--out-dir", required=True)
-    ap.add_argument("--only-s2", action="store_true", help="graph features only (+ s1)")
+    ap.add_argument("--only-s2", action="store_true",
+                    help="train on the graph features (S2, with the stage-1 score s1) only, without the stage-1 "
+                         "features; the manuscript's training does not use it")
     ap.add_argument("--extra-features", default="",
-                    help="comma list of stage-1 feature columns to add (absent columns read as NaN)")
-    ap.add_argument("--drop-features", default="", help="comma list of feature columns to leave out")
+                    help="comma list of stage-1 feature columns to add (absent columns read as NaN); the "
+                         "manuscript's training does not use it")
+    ap.add_argument("--drop-features", default="",
+                    help="comma list of feature columns to leave out; the manuscript's training does not use it")
     ap.add_argument("--trees", type=int, default=400)
     ap.add_argument("--seed", type=int, default=0, help="forest random_state")
     ap.add_argument("--seeds", default="",
@@ -82,15 +86,16 @@ def main():
                     help="write each forest to OUT_DIR/TAG.rfSEED.joblib (export_forest.py exports them)")
     ap.add_argument("--subsample", type=float, default=1.0,
                     help="train on the rows train_stage1.py --subsample F trained stage 1 on (the same "
-                         "draw, sub_u), whose s1 is out-of-bag. 1 (default): every labelled row")
+                         "draw, sub_u), whose s1 is out-of-bag. 1 (default): every labelled row. Exclusive with "
+                         "--cap-per-set; the manuscript's training does not use it")
     ap.add_argument("--cap-per-set", type=int, default=0,
                     help="train on the rows train_stage1.py --cap-per-set N trained stage 1 on (cap_mask over "
                          "each set's full table; their s1 is out-of-bag) among the stage-1 accepted ones, "
                          "so at most N per set. 0 (default): no cap")
     ap.add_argument("--cap-true-only", action="store_true",
                     help="with --cap-per-set: cap the true rows only (cap_mask's true rows); every false and "
-                         "misplaced accepted row is kept. Off (default): the "
-                         "class-stratified cap")
+                         "misplaced accepted row is kept. Off (default): the class-stratified cap. The "
+                         "manuscript's training does not use it")
     ap.add_argument("--exclude-reads", default="",
                     help="a file of read ids (one per line): every row naming one is dropped from training, before the "
                          "cap and the bootstrap; the list and its SHA-256 are recorded with the forest (train_stage1.py)")
@@ -162,7 +167,6 @@ def main():
         nn_all = int(full.cls.isin(["false", "misplaced"]).sum())
         print(f"\n[{a.tag}] TEST {key}: {len(d):,} stage-1 accepted of {len(full):,} candidates; "
               f"stage-2 AUC {au:.4f}")
-        acc = set(zip(d.name_a, d.name_b))
         d.assign(score=s)[["name_a", "name_b", "cls", "score"]].to_csv(
             os.path.join(a.out_dir, f"{a.tag}__{key}.scores.tsv"), sep="\t", index=False)
         for k in keeps:
@@ -176,7 +180,6 @@ def main():
             drop[["name_a", "name_b"]].to_csv(
                 os.path.join(a.out_dir, f"{a.tag}__{key}__keep{k:.3f}.drop.tsv"),
                 sep="\t", header=False, index=False)
-        del acc
 
 
 if __name__ == "__main__":

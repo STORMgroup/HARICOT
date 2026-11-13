@@ -20,8 +20,8 @@ use crate::params::{Params, Strand};
 /// read's seeds are held for the whole overlap stage, so this is most of detection's memory
 /// (472 M seeds on A. thaliana chr1 30x).
 ///
-/// * the hash in 32 bits: every seed hash is `hash64(.., HASH_MASK)` ([`emer_hash`], the
-///   strobemers' `select.rs` combination), and [`hash64`] ends with `& mask`, so it is below
+/// * the hash in 32 bits: every seed hash is `hash64(.., HASH_MASK)` ([`emer_hash`]), and
+///   [`hash64`] ends with `& mask`, so it is below
 ///   2^32 ([`HASH_MASK`]); [`Seed::new`] refuses a wider one;
 /// * the coordinate `pos` (`u32`);
 /// * the read id in 31 bits and the strand in the top bit ([`Seed::new`] refuses a read id of
@@ -122,8 +122,7 @@ pub struct Emer {
 }
 
 /// A quantized event that survived the sig-diff merge. This is the intermediate
-/// stream that both [`dense_emers`] and the content-based selectors in
-/// [`crate::emer::select`] (syncmers, strobemers) are built from — and it is the
+/// stream the e-mers are packed from ([`dense_emers_from_retained`]) — and it is the
 /// stream that defines the coordinate space (see [`retained_quantized`]).
 #[derive(Clone, Copy, Debug)]
 pub struct QEvent {
@@ -140,8 +139,7 @@ pub struct QEvent {
 pub const HASH_MASK: u64 = (1u64 << 32) - 1;
 
 /// Quantize the event stream and apply the sig-diff merge, returning the retained
-/// quantized events in order. Factored out of [`dense_emers`] so the
-/// content-based selectors can share exactly the same front end.
+/// quantized events in order.
 ///
 /// **This function defines the coordinate space.** `diff >= 0` merges a run of
 /// consecutive events that quantize alike into a single retained event, so each
@@ -154,10 +152,9 @@ pub const HASH_MASK: u64 = (1u64 << 32) - 1;
 /// apart by the segmentation noise the merge just discarded. The raw index is kept
 /// as `event_pos` for diagnostics.
 ///
-/// (RawHash2's `ri_sketch_reg` stamps the raw index, `rsketch.c:214-218`. That is
-/// a holdover from when its `diff` was a signal-level sigdiff merge rather than
-/// the bucket-level filter it is now, and RawHash2 is a mapper whose chainer
-/// tolerates drift. A bin-DP feeding an FBG does not.)
+/// DEVIATION: RawHash2's `ri_sketch_reg` stamps the raw index (`rsketch.c:214-218`).
+/// RawHash2 is a mapper whose chainer tolerates that drift; the bin alignment feeding the
+/// fuzzy de Bruijn graph does not.
 pub fn retained_quantized(events: &[f32], params: &Params) -> Vec<QEvent> {
     let diff = params.sketch.diff;
     let mask_quant = (1u64 << params.quant.q) - 1;
@@ -184,10 +181,6 @@ pub fn retained_quantized(events: &[f32], params: &Params) -> Vec<QEvent> {
 
 /// Pack `buckets.len()` quantized events (`q` bits each, oldest first) into one
 /// integer and hash it with [`hash64`]. `buckets.len() * q` must be `<= 64`.
-///
-/// Used for both e-mers and the shorter *s*-mers of the content-based selectors,
-/// so a selected syncmer's hash is identical to the dense e-mer's hash at the
-/// same position (anchors still join on hash).
 pub fn emer_hash(buckets: &[u32], q: u32) -> u64 {
     let mut packed = 0u64;
     for &b in buckets {
@@ -204,13 +197,14 @@ pub fn emer_hash(buckets: &[u32], q: u32) -> u64 {
 /// index is kept alongside as [`Emer::event_pos`], which is what RawHash2 stamps
 /// (`rsketch.c:214-218`) and what `tests/hash_compat.rs` pins against the golden.
 /// See [`retained_quantized`] for why `pos` is not the raw index.
+#[cfg(test)]
 pub fn dense_emers(events: &[f32], params: &Params) -> Vec<Emer> {
     let retained = retained_quantized(events, params);
     dense_emers_from_retained(&retained, params.sketch.e as usize, params.quant.q)
 }
 
 /// Pack every length-`e` window of an already-quantized stream into an e-mer.
-/// Shared by [`dense_emers`] and [`crate::emer::select`].
+/// Shared by `dense_emers` (tests) and [`sketch_from_retained`].
 pub fn dense_emers_from_retained(retained: &[QEvent], e: usize, q: u32) -> Vec<Emer> {
     if e == 0 || retained.len() < e {
         return Vec::new();
@@ -259,11 +253,8 @@ pub fn minimizers(emers: &[Emer], w: usize) -> Vec<Emer> {
     out
 }
 
-/// Sketch a read's events into seeds, using `params.sketch.method` to choose
-/// the selection scheme (default [`crate::emer::select::SketchMethod::Minimizer`]).
-///
-/// All schemes share the same `retained_quantized` front end; see
-/// [`crate::emer::select`] for the indel-robust alternatives.
+/// Sketch a read's events into seeds: RawHash2's `(w, e)` window minimizers
+/// (`sketch.w = 0` keeps every e-mer) over the `retained_quantized` stream.
 pub fn sketch(events: &[f32], read_id: u32, strand: Strand, params: &Params) -> Vec<Seed> {
     let retained = retained_quantized(events, params);
     sketch_from_retained(&retained, read_id, strand, params)
@@ -278,9 +269,8 @@ pub fn sketch_from_retained(
     strand: Strand,
     params: &Params,
 ) -> Vec<Seed> {
-    use crate::emer::select::{SelectCfg, select};
-    let cfg = SelectCfg::from_params(params);
-    select(retained, params.sketch.method, &cfg)
+    let dense = dense_emers_from_retained(retained, params.sketch.e as usize, params.quant.q);
+    minimizers(&dense, params.sketch.w as usize)
         .into_iter()
         .map(|m| Seed::new(m.hash, read_id, m.pos, strand))
         .collect()

@@ -4,7 +4,7 @@
 The layout (OUTDIR/unitig_paths.tsv, one row per path step) gives for each step the node's anchor read (the read
 that defines the node), the node's retained events on it [ev_beg, ev_end), the direction the path crosses the node,
 and advance_events: the node's length plus the edge's offset to the next node, i.e. where the next node starts, in
-this node's anchor events (pipeline/src/fbg_build.rs, the unitig_paths.tsv writer). Each step writes its anchor
+this node's anchor events (src/pipeline/fbg_build.rs, the unitig_paths.tsv writer). Each step writes its anchor
 read's bases over exactly that stretch, and the unitig is the steps' pieces in path order:
   dir +   events [ev_beg, ev_beg + advance)
   dir -   events [ev_end - advance, ev_end), reverse-complemented

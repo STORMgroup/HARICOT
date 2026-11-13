@@ -1,58 +1,48 @@
 [package]
 name = "haricot"
-version = "0.1.0"
+version = "1.0.1"
 edition = "2024"
-rust-version = "1.87"
-description = "De Bruijn / wtdbg2-style genome assembly directly from raw nanopore signal (e-mers)"
+# The toolchain the manuscript builds used and rust-toolchain.toml pins; the code needs at least 1.88 (let chains).
+rust-version = "1.96"
+description = "Assembles genomes directly from raw nanopore signals, without basecalling, with a fuzzy de Bruijn graph over e-mers"
 license = "MIT"
+repository = "https://github.com/STORMgroup/HARICOT"
+readme = "README.md"
 
-[workspace]
-# The pipeline programs (pipeline/) build with the CLI: `cargo build --release` puts every binary in target/release.
-members = [".", "pipeline"]
-default-members = [".", "pipeline"]
-
-[[bin]]
-name = "haricot"
-path = "src/main.rs"
+# Binaries (auto-discovered): `haricot` (src/main.rs) and one program per file of src/bin/, named after it: the steps
+# `haricot assemble` runs, `haricot-ovl-filter` (used by the checks) and the truth programs. `cargo build --release`
+# puts every binary in target/release.
 
 [lib]
 name = "haricot"
 path = "src/lib.rs"
 
 [dependencies]
-# Raw signal I/O. pod5 is the primary format (pure-Rust reader, no system deps).
+# Raw signal I/O: pod5 (pure-Rust reader, no system deps).
 pod5lib = { git = "https://github.com/Psy-Fer/pod5lib-rs", rev = "4e77fe824201e52ea41f98fb4eaeb0ace6e215ef" }
-# CLI, errors, logging.
+# CLI, errors.
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
-thiserror = "2"
-log = "0.4"
-env_logger = "0.11"
 # Fast non-cryptographic hash maps for seed indexing.
 rustc-hash = "2"
-# Data-parallelism for the all-vs-all per-pair overlap DP (performance).
+# Data parallelism (per read, per read pair, per row).
 rayon = "1"
-# Multithreaded allocator (see the `#[global_allocator]` in lib.rs). The overlap DP
-# allocates a scratch `Vec<f64>` per slope evaluation per read pair -- ~1.2e9
-# short-lived allocations on E. coli fwd-30x -- and glibc arena locking makes that the
+# Multithreaded allocator (see the `#[global_allocator]` in lib.rs). The overlap
+# detection allocates a scratch `Vec<f64>` per slope evaluation per read pair -- ~1.2e9
+# short-lived allocations on a 30x E. coli set -- and glibc arena locking makes that the
 # scaling limit of an otherwise embarrassingly parallel phase.
 mimalloc = { version = "0.1", default-features = false }
-# Serialization (derive) so overlaps can be cached to disk and reused across
-# build-parameter iterations without recomputing the expensive all-vs-all.
+# Serialization (derive) of the candidate cache the pipeline steps pass on.
 serde = { version = "1", features = ["derive"] }
+# Cache overlaps to disk (haricot-detect --save-overlaps) for the later steps.
+bincode = "1"
 # `haricot assemble`: per-step resource use of the pipeline programs (wait4) and the forests' SHA-256.
 libc = "0.2"
 sha2 = "0.10"
 
-# fast5 (HDF5) support is OPTIONAL and off by default; pod5 is the focus.
-# Enable with `--features fast5` (requires a system libhdf5).
-hdf5-metno = { version = "0.12.5", optional = true }
-
-[features]
-default = []
-fast5 = ["dep:hdf5-metno"]
-
-[dev-dependencies]
+[lints.clippy]
+# Nested `if`s stay as written; clippy would merge them into let chains.
+collapsible_if = "allow"
 
 [profile.release]
 lto = "thin"

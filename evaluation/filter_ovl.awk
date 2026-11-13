@@ -1,11 +1,11 @@
-# Density-reducing pre-filter for a Rawsamble r10ava PAF (grouped by query).
+# Rawsamble's overlaps (RawHash2 -x r10ava PAF, grouped by query) reduced to the TOPN best per query read, for miniasm
+# when it assembles nothing from all of them (run_tools.sh: TOPN 25, 15, then 10; MINSPAN 2000, MINMATCH 100).
 # Two passes over ovl.paf:
-#   Pass 1: harvest name -> event-length (col2) for the col7 relabel.
-#   Pass 2: drop no-hit '*' rows; drop overlaps with qspan<MINSPAN or
-#           col10<MINMATCH; relabel col7 (target len) to event space
-#           (fix_paf_tlen semantics); then per QUERY read keep only the TOPN
-#           highest-scoring overlaps (score = s1:i: chain score, else col10).
-# Nothing is silently truncated: END prints all drop counters to stderr.
+#   Pass 1: each read's length in events (column 2).
+#   Pass 2: drop no-hit '*' rows and overlaps with a query span < MINSPAN or matches (column 10) < MINMATCH; set the
+#           target length (column 7) to the target's length in events; then per query read keep the TOPN
+#           highest-scoring overlaps (score: the s1:i: chain score, else column 10).
+# Prints its counts of kept and dropped rows to stderr. Needs GNU awk (asort).
 #   usage: awk -v MINSPAN=.. -v MINMATCH=.. -v TOPN=.. -f filter_ovl.awk ovl.paf ovl.paf > filt.paf
 BEGIN {
     FS = OFS = "\t"
