@@ -1,5 +1,6 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust 1.96](https://img.shields.io/badge/Rust-1.96-orange.svg)](rust-toolchain.toml)
+[![bioRxiv](https://img.shields.io/badge/bioRxiv-10.64898%2F2026.11.11.765872-bd2736.svg)](https://doi.org/10.64898/2026.11.11.765872)
 [![Zenodo](https://img.shields.io/badge/Zenodo-10.5281%2Fzenodo.23963126-blue)](https://doi.org/10.5281/zenodo.23963126)
 
 # HARICOT: genome assembly from raw nanopore signals
@@ -232,7 +233,25 @@ The raw reads stay under the licences of their sources (`datasets/sources.tsv`).
 
 ## Citation
 
-Cite the Zenodo record [10.5281/zenodo.23963126](https://doi.org/10.5281/zenodo.23963126). The manuscript reference
-will be added here. Changes between versions: [`CHANGELOG.md`](CHANGELOG.md).
+If you use HARICOT, please cite the preprint ([`CITATION.cff`](CITATION.cff)):
+
+> Ulysse McConnell, Quang Ngo, Can Firtina. HARICOT: De Novo Assembly of Raw Nanopore Signals using Fuzzy de Bruijn
+> Graphs. *bioRxiv* (2026). [doi:10.64898/2026.11.11.765872](https://doi.org/10.64898/2026.11.11.765872)
+
+```bibtex
+@article{mcconnell2026haricot,
+  title   = {{HARICOT}: De Novo Assembly of Raw Nanopore Signals using Fuzzy de {Bruijn} Graphs},
+  author  = {McConnell, Ulysse and Ngo, Quang and Firtina, Can},
+  journal = {bioRxiv},
+  year    = {2026},
+  doi     = {10.64898/2026.11.11.765872},
+  url     = {https://doi.org/10.64898/2026.11.11.765872}
+}
+```
+
+The trained forests and the read lists are in the Zenodo record
+[10.5281/zenodo.23963126](https://doi.org/10.5281/zenodo.23963126).
+
+Changesbetween versions: [`CHANGELOG.md`](CHANGELOG.md).
 
 Questions and bug reports: [GitHub issues](https://github.com/STORMgroup/HARICOT/issues).
