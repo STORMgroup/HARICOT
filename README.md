@@ -3,11 +3,11 @@
 [![bioRxiv](https://img.shields.io/badge/bioRxiv-10.64898%2F2026.11.11.765872-bd2736.svg)](https://doi.org/10.64898/2026.11.11.765872)
 [![Zenodo](https://img.shields.io/badge/Zenodo-10.5281%2Fzenodo.23963126-blue)](https://doi.org/10.5281/zenodo.23963126)
 
-# HARICOT: genome assembly from raw nanopore signals
+# HARICOT: De Novo Assembly of Raw Nanopore Signals using Fuzzy de Bruijn Graphs
 
 HARICOT assembles genomes directly from raw nanopore signals, without basecalling. It builds a fuzzy de Bruijn graph, as
 [wtdbg2](https://github.com/ruanjue/wtdbg2) does for nucleotide sequences, over *e-mers*: short runs of signal events
-from the signal processing of [RawHash2](https://github.com/CMU-SAFARI/RawHash) (ONT R10.4.1). The output is a layout:
+from the signal processing of [RawHash2](https://github.com/STORMgroup/RawHash2) (ONT R10.4.1). The output is a layout:
 unitigs as paths of read segments, with no consensus sequence.
 
 ## Abstract
